@@ -1,0 +1,8 @@
+{
+  "schema": "./src/db/schema/index.ts",
+  "out": "./drizzle",
+  "driver": "pg",
+  "dbCredentials": {
+    "connectionString": "postgres://user:password@localhost:5432/videoplatform"
+  }
+}

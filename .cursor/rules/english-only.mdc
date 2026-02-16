@@ -1,0 +1,15 @@
+---
+description: Project language convention - English only for code, comments, and UI
+alwaysApply: true
+---
+
+# Language: English Only
+
+This project is conducted entirely in English.
+
+- **Code**: Variable names, function names, file names — use English
+- **Comments**: Inline, JSDoc, block comments — use English
+- **UI**: Labels, buttons, messages, placeholders, tooltips — use English
+- **API**: Endpoint paths, response keys, error messages — use English
+
+When adding or modifying code, keep all identifiers, strings, and comments in English.

@@ -138,7 +138,7 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
       // ignore invalid JSON
     }
     if (!playSelectors?.length && body.data.url.includes('bgaming-network.com')) {
-      playSelectors = ['#playBtn', 'button#playBtn'];
+      playSelectors = ['#playBtn', 'button#playBtn', '[class*="replay"]'];
     }
 
     await addScreencastJob({
@@ -189,6 +189,61 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
     await db.update(videoEntities)
       .set({ metadata: { ...meta, stopRequested: true } })
       .where(and(eq(videoEntities.id, videoId), eq(videoEntities.projectId, id)));
+
+    request.log.info({ videoId: videoId.slice(0, 8) }, 'Stop requested, worker will pick up');
+    return reply.send({ success: true });
+  });
+
+  fastify.post('/:id/videos/:videoId/restart', async (request, reply) => {
+    const { id, videoId } = request.params as { id: string; videoId: string };
+    const project = await db.query.projects.findFirst({
+      where: (p, { and, eq }) => and(eq(p.id, id), eq(p.ownerId, request.user!.id)),
+    });
+    if (!project) return reply.status(404).send({ error: 'Not found' });
+
+    const [video] = await db.select()
+      .from(videoEntities)
+      .where(and(eq(videoEntities.id, videoId), eq(videoEntities.projectId, id)));
+    if (!video) return reply.status(404).send({ error: 'Video not found' });
+    if (video.status !== 'failed') {
+      return reply.status(400).send({ error: 'Only failed recordings can be restarted' });
+    }
+    const url = video.sourceUrl;
+    if (!url) {
+      return reply.status(400).send({ error: 'No source URL to restart' });
+    }
+
+    const durationLimit = parseInt(process.env.SCREENCAST_MAX_DURATION || '600', 10);
+    let endSelectors: string[] | undefined;
+    let playSelectors: string[] | undefined;
+    try {
+      const s = process.env.SCREENCAST_END_SELECTORS;
+      if (s) endSelectors = JSON.parse(s) as string[];
+    } catch {
+      // ignore
+    }
+    try {
+      const s = process.env.SCREENCAST_PLAY_SELECTORS;
+      if (s) playSelectors = JSON.parse(s) as string[];
+    } catch {
+      // ignore
+    }
+    if (!playSelectors?.length && url.includes('bgaming-network.com')) {
+      playSelectors = ['#playBtn', 'button#playBtn', '[class*="replay"]'];
+    }
+
+    await db.update(videoEntities)
+      .set({ status: 'processing', metadata: {} })
+      .where(and(eq(videoEntities.id, videoId), eq(videoEntities.projectId, id)));
+
+    await addScreencastJob({
+      projectId: id,
+      videoId: video.id,
+      url,
+      durationLimit,
+      endSelectors,
+      playSelectors,
+    });
 
     return reply.send({ success: true });
   });

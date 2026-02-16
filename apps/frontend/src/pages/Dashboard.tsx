@@ -104,6 +104,9 @@ export function Dashboard() {
         <div className="container mx-auto flex h-14 items-center justify-between px-4">
           <h1 className="font-semibold">Video Platform</h1>
           <div className="flex items-center gap-2">
+            <Button variant="ghost" size="sm" onClick={() => navigate("/queue")}>
+              Queue
+            </Button>
             <span className="text-sm text-muted-foreground">
               {user.username || "User"}
             </span>

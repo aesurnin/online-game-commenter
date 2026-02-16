@@ -1,6 +1,7 @@
 import path from 'path';
 import { config } from 'dotenv';
 
-// Load root .env first (when running from apps/backend in monorepo)
+// Load local .env first
+config();
+// Load root .env as fallback for variables not set in local .env
 config({ path: path.resolve(process.cwd(), '../../.env') });
-config(); // local .env overrides

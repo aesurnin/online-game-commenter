@@ -1,8 +1,8 @@
 #!/bin/bash
 set -e
 
-# Start Xvfb
-Xvfb :99 -screen 0 1280x720x24 -ac &
+# Start Xvfb (with better buffer handling)
+Xvfb :99 -screen 0 1280x720x24 -ac +extension GLX +extension RENDER -fbdir /dev/shm &
 XVFB_PID=$!
 
 # Wait for Xvfb to be ready

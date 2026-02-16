@@ -2,7 +2,7 @@ import { useEffect, useState, useRef } from "react"
 import { useNavigate, useParams } from "react-router-dom"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Plus, Trash2, Video, Upload, Link, Loader2, XCircle, Square } from "lucide-react"
+import { Plus, Trash2, Video, Upload, Link, Loader2, XCircle, Square, RotateCw } from "lucide-react"
 import { useLogs } from "@/contexts/LogsContext"
 
 type VideoEntity = {
@@ -28,6 +28,7 @@ export function ProjectView() {
   const [livePreviewUrl, setLivePreviewUrl] = useState<string | null>(null)
   const [cancelling, setCancelling] = useState(false)
   const [stopping, setStopping] = useState(false)
+  const [restarting, setRestarting] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const navigate = useNavigate()
   const { addLog } = useLogs()
@@ -91,7 +92,7 @@ export function ProjectView() {
     return () => clearInterval(interval)
   }, [selectedVideo?.id, selectedVideo?.status])
 
-  // Poll live preview from Docker worker (what the worker is actually recording)
+  // Poll live preview (what the worker is actually recording)
   useEffect(() => {
     if (!id || !selectedVideo || selectedVideo.status !== "processing") {
       if (livePreviewUrl) {
@@ -243,6 +244,31 @@ export function ProjectView() {
     }
   }
 
+  async function handleRestartVideo(e: React.MouseEvent, video: VideoEntity) {
+    e.stopPropagation()
+    if (!id) return
+    addLog(`Restarting recording ${video.id.slice(0, 8)}...`)
+    setRestarting(true)
+    try {
+      const r = await fetch(`/api/projects/${id}/videos/${video.id}/restart`, {
+        method: "POST",
+        credentials: "include",
+      })
+      if (r.ok) {
+        addLog(`Recording restarted`)
+        refreshVideosAndSelection()
+        setTimeout(refreshVideosAndSelection, 500)
+      } else {
+        const err = await r.json().catch(() => ({}))
+        addLog(`Restart failed: ${err.error || r.status}`, "error")
+      }
+    } catch {
+      addLog("Restart failed: network error", "error")
+    } finally {
+      setRestarting(false)
+    }
+  }
+
   async function handleCancelRecording(e: React.MouseEvent, video: VideoEntity) {
     e.stopPropagation()
     if (!id) return
@@ -315,7 +341,10 @@ export function ProjectView() {
                 navigate("/dashboard")
               }}
             >
-              ← Back
+              ← Dashboard
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => navigate("/queue")}>
+              Queue
             </Button>
             <h1 className="font-semibold">{project.name}</h1>
           </div>
@@ -360,6 +389,18 @@ export function ProjectView() {
                           ? `Video ${v.id.slice(0, 8)}`
                           : "No video"}
                 </span>
+                {v.status === "failed" && (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-6 w-6 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
+                    onClick={(e) => { e.stopPropagation(); handleRestartVideo(e, v) }}
+                    title="Restart"
+                    disabled={restarting}
+                  >
+                    <RotateCw className="h-3.5 w-3.5" />
+                  </Button>
+                )}
                 <Button
                   variant="ghost"
                   size="icon"
@@ -457,13 +498,13 @@ export function ProjectView() {
                 {livePreviewUrl ? (
                   <img
                     src={livePreviewUrl}
-                    alt="Live preview from Docker (what is being recorded)"
+                    alt="Live preview (what is being recorded)"
                     className="w-full h-full object-contain bg-black"
                   />
                 ) : (
                   <div className="w-full h-full flex flex-col items-center justify-center gap-3 bg-muted text-muted-foreground">
                     <Loader2 className="h-12 w-12 animate-spin" />
-                    <p className="text-sm">Preview from Docker will appear here once the worker starts.</p>
+                    <p className="text-sm">Preview will appear here once the worker starts recording.</p>
                   </div>
                 )}
                 <div className="absolute inset-x-0 top-0 flex items-center justify-between gap-2 bg-gradient-to-b from-black/80 to-transparent p-3">
@@ -503,7 +544,7 @@ export function ProjectView() {
                 </div>
               </div>
               <p className="text-sm text-muted-foreground text-center">
-                Live preview from the Docker worker (what Chromium in Linux is recording). Video + audio will be saved when the replay ends or after Stop.
+                Live preview of what is being recorded. Video + audio will be saved when the replay ends or after Stop.
               </p>
             </div>
           ) : selectedVideo?.status === "cancelled" ? (
@@ -521,6 +562,16 @@ export function ProjectView() {
               <p className="text-sm text-muted-foreground mt-1">
                 {selectedVideo.metadata?.error ?? "Unknown error"}
               </p>
+              <Button
+                variant="outline"
+                size="sm"
+                className="mt-4"
+                onClick={(e) => handleRestartVideo(e, selectedVideo)}
+                disabled={restarting}
+              >
+                {restarting ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <RotateCw className="h-4 w-4 mr-2" />}
+                Restart
+              </Button>
             </div>
           ) : (selectedVideo?.playUrl ?? selectedVideo?.sourceUrl) ? (
             <div className="w-full max-w-4xl aspect-video bg-black rounded-lg overflow-hidden shadow-lg">

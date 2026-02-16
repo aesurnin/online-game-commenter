@@ -28,8 +28,7 @@ export type ScreencastJobData = {
 export const screencastQueue = new Queue<ScreencastJobData>('screencast', {
   connection: { ...redisOpts, maxRetriesPerRequest: null },
   defaultJobOptions: {
-    attempts: 2,
-    backoff: { type: 'exponential', delay: 5000 },
+    attempts: 1,
     removeOnComplete: { count: 100 },
     removeOnFail: { count: 50 },
   },

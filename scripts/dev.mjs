@@ -21,6 +21,18 @@ function run(cmd, args = [], opts = {}) {
   });
 }
 
+function loadEnv() {
+  const envPath = path.join(rootDir, '.env');
+  if (!fs.existsSync(envPath)) return {};
+  const content = fs.readFileSync(envPath, 'utf8');
+  const env = {};
+  for (const line of content.split('\n')) {
+    const m = line.match(/^([^#=]+)=(.*)$/);
+    if (m) env[m[1].trim()] = m[2].trim();
+  }
+  return env;
+}
+
 function tcpConnect(host, port) {
   return new Promise((resolve) => {
     const s = net.createConnection(port, host, () => {
@@ -54,8 +66,18 @@ async function main() {
     console.log('Created .env from .env.example. Fill in R2 credentials for uploads.');
   }
 
-  console.log('Starting Docker (postgres, redis, screencast-worker)...');
-  await run('docker-compose', ['up', '-d']);
+  const env = loadEnv();
+  const strategy = env.RECORDING_STRATEGY || 'docker';
+  const useStreamWorker = strategy === 'puppeteer-stream';
+
+  if (useStreamWorker) {
+    console.log('Starting Docker (postgres, redis only — worker runs locally with puppeteer-stream)...');
+    await run('docker-compose', ['stop', 'screencast-worker']).catch(() => {});
+    await run('docker-compose', ['up', '-d', 'postgres', 'redis']);
+  } else {
+    console.log('Starting Docker (postgres, redis, screencast-worker)...');
+    await run('docker-compose', ['up', '-d']);
+  }
 
   console.log('Waiting for Redis...');
   await waitForRedis();
@@ -66,8 +88,16 @@ async function main() {
   console.log('Applying DB schema...');
   await run('npm', ['run', 'db:push']);
 
-  console.log('Starting backend and frontend...');
-  await run('npx concurrently -n backend,frontend -c blue,green "npm run dev:backend" "npm run dev:frontend"', []);
+  if (useStreamWorker) {
+    console.log('Starting backend, frontend, and worker...');
+    await run(
+      'npx concurrently -n backend,frontend,worker -c blue,green,magenta "npm run dev:backend" "npm run dev:frontend" "BACKEND_URL=http://localhost:3000 npm run worker"',
+      []
+    );
+  } else {
+    console.log('Starting backend and frontend...');
+    await run('npx concurrently -n backend,frontend -c blue,green "npm run dev:backend" "npm run dev:frontend"', []);
+  }
 }
 
 main().catch((err) => {

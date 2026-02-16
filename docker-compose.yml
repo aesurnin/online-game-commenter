@@ -29,11 +29,6 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379
       - DATABASE_URL=postgresql://user:password@postgres:5432/videoplatform
-      - R2_ACCOUNT_ID=${R2_ACCOUNT_ID}
-      - R2_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID}
-      - R2_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}
-      - R2_BUCKET_NAME=${R2_BUCKET_NAME}
-      - R2_ENDPOINT=${R2_ENDPOINT}
       - DISPLAY=:99
       - PULSE_SINK=recording
       - SCREENCAST_MAX_DURATION=${SCREENCAST_MAX_DURATION:-600}
@@ -42,6 +37,7 @@ services:
       - NODE_OPTIONS=--tls-min-v1.2
     cap_add:
       - SYS_ADMIN
+    shm_size: '2gb'
 
 volumes:
   postgres_data:

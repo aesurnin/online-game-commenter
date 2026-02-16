@@ -3,7 +3,8 @@ import { Lucia } from "lucia";
 import { db } from "../db/index.js";
 import { sessions, users } from "../db/schema/index.js";
 
-const adapter = new DrizzlePostgreSQLAdapter(db, sessions, users);
+// Type assertion: Drizzle schema columns satisfy Lucia adapter expectations at runtime
+const adapter = new DrizzlePostgreSQLAdapter(db, sessions as never, users as never);
 
 export const lucia = new Lucia(adapter, {
 	sessionCookie: {

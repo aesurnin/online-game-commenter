@@ -5,6 +5,8 @@ import { projects, videoEntities } from '../db/schema/index.js';
 import { and, eq } from 'drizzle-orm';
 import z from 'zod';
 import { uploadToR2, deleteFromR2, getPresignedUrl } from '../lib/r2.js';
+import { addScreencastJob } from '../lib/queue.js';
+import { getFrame } from '../lib/live-preview-store.js';
 
 const projectsRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.addHook('preHandler', async (request, reply) => {
@@ -54,7 +56,7 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
     const withUrls = await Promise.all(
       videos.map(async (v) => {
         const out = { ...v };
-        if (v.sourceUrl && !v.sourceUrl.startsWith('/')) {
+        if (v.sourceUrl?.startsWith('projects/')) {
           try {
             (out as Record<string, unknown>).playUrl = await getPresignedUrl(
               v.sourceUrl,
@@ -116,11 +118,101 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
 
     const [video] = await db.insert(videoEntities).values({
       projectId: id,
-      status: 'ready',
+      status: 'processing',
       sourceUrl: body.data.url,
     }).returning();
 
+    const durationLimit = parseInt(process.env.SCREENCAST_MAX_DURATION || '600', 10);
+    let endSelectors: string[] | undefined;
+    let playSelectors: string[] | undefined;
+    try {
+      const s = process.env.SCREENCAST_END_SELECTORS;
+      if (s) endSelectors = JSON.parse(s) as string[];
+    } catch {
+      // ignore invalid JSON
+    }
+    try {
+      const s = process.env.SCREENCAST_PLAY_SELECTORS;
+      if (s) playSelectors = JSON.parse(s) as string[];
+    } catch {
+      // ignore invalid JSON
+    }
+    if (!playSelectors?.length && body.data.url.includes('bgaming-network.com')) {
+      playSelectors = ['#playBtn', 'button#playBtn'];
+    }
+
+    await addScreencastJob({
+      projectId: id,
+      videoId: video.id,
+      url: body.data.url,
+      durationLimit,
+      endSelectors,
+      playSelectors,
+    });
+
     return reply.status(201).send(video);
+  });
+
+  fastify.get('/:id/videos/:videoId/live-preview', async (request, reply) => {
+    const { id, videoId } = request.params as { id: string; videoId: string };
+    const project = await db.query.projects.findFirst({
+      where: (p, { and, eq }) => and(eq(p.id, id), eq(p.ownerId, request.user!.id)),
+    });
+    if (!project) return reply.status(404).send({ error: 'Not found' });
+    const [video] = await db.select()
+      .from(videoEntities)
+      .where(and(eq(videoEntities.id, videoId), eq(videoEntities.projectId, id)));
+    if (!video) return reply.status(404).send({ error: 'Video not found' });
+    const buffer = getFrame(videoId);
+    if (!buffer) {
+      return reply.status(204).send();
+    }
+    return reply.header('Content-Type', 'image/jpeg').header('Cache-Control', 'no-store').send(buffer);
+  });
+
+  fastify.post('/:id/videos/:videoId/stop', async (request, reply) => {
+    const { id, videoId } = request.params as { id: string; videoId: string };
+    const project = await db.query.projects.findFirst({
+      where: (p, { and, eq }) => and(eq(p.id, id), eq(p.ownerId, request.user!.id)),
+    });
+    if (!project) return reply.status(404).send({ error: 'Not found' });
+
+    const [video] = await db.select()
+      .from(videoEntities)
+      .where(and(eq(videoEntities.id, videoId), eq(videoEntities.projectId, id)));
+    if (!video) return reply.status(404).send({ error: 'Video not found' });
+    if (video.status !== 'processing') {
+      return reply.status(400).send({ error: 'Video is not being recorded' });
+    }
+
+    const meta = (video.metadata as Record<string, unknown>) || {};
+    await db.update(videoEntities)
+      .set({ metadata: { ...meta, stopRequested: true } })
+      .where(and(eq(videoEntities.id, videoId), eq(videoEntities.projectId, id)));
+
+    return reply.send({ success: true });
+  });
+
+  fastify.post('/:id/videos/:videoId/cancel', async (request, reply) => {
+    const { id, videoId } = request.params as { id: string; videoId: string };
+    const project = await db.query.projects.findFirst({
+      where: (p, { and, eq }) => and(eq(p.id, id), eq(p.ownerId, request.user!.id)),
+    });
+    if (!project) return reply.status(404).send({ error: 'Not found' });
+
+    const [video] = await db.select()
+      .from(videoEntities)
+      .where(and(eq(videoEntities.id, videoId), eq(videoEntities.projectId, id)));
+    if (!video) return reply.status(404).send({ error: 'Video not found' });
+    if (video.status !== 'processing') {
+      return reply.status(400).send({ error: 'Video is not being recorded' });
+    }
+
+    await db.update(videoEntities)
+      .set({ status: 'cancelled', metadata: { cancelledAt: new Date().toISOString() } })
+      .where(and(eq(videoEntities.id, videoId), eq(videoEntities.projectId, id)));
+
+    return reply.send({ success: true });
   });
 
   fastify.delete('/:id/videos/:videoId', async (request, reply) => {
@@ -130,13 +222,18 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
     });
     if (!project) return reply.status(404).send({ error: 'Not found' });
 
+    // If recording, signal worker to stop before deleting
+    await db.update(videoEntities)
+      .set({ status: 'cancelled' })
+      .where(and(eq(videoEntities.id, videoId), eq(videoEntities.projectId, id), eq(videoEntities.status, 'processing')));
+
     const [deleted] = await db.delete(videoEntities)
       .where(and(eq(videoEntities.id, videoId), eq(videoEntities.projectId, id)))
       .returning();
 
     if (!deleted) return reply.status(404).send({ error: 'Video not found' });
 
-    if (deleted.sourceUrl && !deleted.sourceUrl.startsWith('/')) {
+    if (deleted.sourceUrl?.startsWith('projects/')) {
       try {
         await deleteFromR2(deleted.sourceUrl);
       } catch {

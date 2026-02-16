@@ -5,6 +5,8 @@ import {
   GetObjectCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
+import https from 'https';
 
 const BUCKET = process.env.R2_BUCKET_NAME!;
 const ENDPOINT = process.env.R2_ENDPOINT!;
@@ -16,6 +18,7 @@ function getClient(): S3Client {
     if (!BUCKET || !ENDPOINT) {
       throw new Error('R2_BUCKET_NAME and R2_ENDPOINT must be set');
     }
+    const httpsAgent = new https.Agent({ minVersion: 'TLSv1.2', maxVersion: 'TLSv1.3' });
     client = new S3Client({
       region: 'auto',
       endpoint: ENDPOINT,
@@ -24,6 +27,7 @@ function getClient(): S3Client {
         secretAccessKey: process.env.R2_SECRET_ACCESS_KEY!,
       },
       forcePathStyle: true,
+      requestHandler: new NodeHttpHandler({ httpsAgent }),
     });
   }
   return client;

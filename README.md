@@ -10,23 +10,36 @@ Platform for video analysis and social media content creation.
 
 ## Setup
 
-1. Start Docker (Postgres + Redis):
+**Prerequisites:** Docker Desktop, Node.js 20+
+
+1. First time only — copy `.env.example` to `.env` and fill in your Cloudflare R2 credentials (see [docs/CLOUDFLARE_R2_SETUP.md](./docs/CLOUDFLARE_R2_SETUP.md)):
    ```bash
-   docker-compose up -d
+   cp .env.example .env
+   # Edit .env with your R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME, R2_ENDPOINT
    ```
 
-2. Apply database schema:
-   ```bash
-   npm run db:push
-   ```
-
-3. Start everything:
+2. Start everything with one command:
    ```bash
    npm run dev
    ```
-   This runs both backend (port 3000) and frontend (port 5173) in one terminal.
+   This will:
+   - Start Docker (Postgres, Redis, screencast-worker)
+   - Wait for Redis to be ready
+   - Apply the database schema
+   - Start backend (port 3000) and frontend (port 5173)
 
-4. Open http://localhost:5173 (or 5174)
+3. Open http://localhost:5173 (or 5174)
+
+## Screencast Recording (Add Video by URL)
+
+When you add a video by pasting a replay URL, the system records the screen and audio from that page:
+
+- **Backend** enqueues a job in BullMQ and returns immediately
+- **Screencast worker** (runs in Docker) opens the URL in Chromium, records with FFmpeg + PulseAudio, uploads to R2
+
+The screencast worker runs automatically when you use `npm run dev`. It reads R2 credentials from the root `.env` file.
+
+For **live preview** (the image you see while recording is what the Docker worker is actually capturing), set `BACKEND_URL` and `SCREENCAST_PREVIEW_SECRET` in `.env`. Use the same secret value so the worker can send frames to the backend; e.g. `BACKEND_URL=http://host.docker.internal:3000` and any random string for `SCREENCAST_PREVIEW_SECRET`.
 
 ## Contributing
 

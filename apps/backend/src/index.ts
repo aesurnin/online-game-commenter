@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import './load-env.js';
 import Fastify, { FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
@@ -45,8 +45,10 @@ server.addHook('preHandler', async (request, reply) => {
 // Routes
 import authRoutes from './routes/auth.js';
 import projectsRoutes from './routes/projects.js';
+import { internalRoutes } from './routes/internal.js';
 server.register(authRoutes, { prefix: '/auth' });
 server.register(projectsRoutes, { prefix: '/projects' });
+server.register(internalRoutes, { prefix: '/internal' });
 
 server.get('/ping', async (request, reply) => {
   return { pong: 'it works!' };

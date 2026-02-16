@@ -2,7 +2,7 @@ import { useEffect, useState, useRef } from "react"
 import { useNavigate, useParams } from "react-router-dom"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Plus, Trash2, Video, Upload, Link, Loader2 } from "lucide-react"
+import { Plus, Trash2, Video, Upload, Link, Loader2, XCircle, Square } from "lucide-react"
 import { useLogs } from "@/contexts/LogsContext"
 
 type VideoEntity = {
@@ -10,6 +10,8 @@ type VideoEntity = {
   status: string
   sourceUrl?: string
   playUrl?: string
+  metadata?: { error?: string }
+  createdAt?: string
 }
 
 export function ProjectView() {
@@ -22,6 +24,10 @@ export function ProjectView() {
   const [uploadProgress, setUploadProgress] = useState<number | null>(null)
   const [urlInput, setUrlInput] = useState("")
   const [urlLoading, setUrlLoading] = useState(false)
+  const [recordingTick, setRecordingTick] = useState(0)
+  const [livePreviewUrl, setLivePreviewUrl] = useState<string | null>(null)
+  const [cancelling, setCancelling] = useState(false)
+  const [stopping, setStopping] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const navigate = useNavigate()
   const { addLog } = useLogs()
@@ -35,8 +41,23 @@ export function ProjectView() {
 
   async function fetchVideos() {
     if (!id) return []
-    const r = await fetch(`/api/projects/${id}/videos`, { credentials: "include" })
+    const r = await fetch(`/api/projects/${id}/videos?_=${Date.now()}`, {
+      credentials: "include",
+      cache: "no-store",
+      headers: { "Cache-Control": "no-cache", Pragma: "no-cache" },
+    })
     return r.ok ? r.json() : []
+  }
+
+  function refreshVideosAndSelection() {
+    fetchVideos().then((vids) => {
+      setVideos(vids)
+      setSelectedVideo((prev) => {
+        if (!prev) return null
+        const found = vids.find((v) => v.id === prev.id)
+        return found ?? prev
+      })
+    })
   }
 
   useEffect(() => {
@@ -56,6 +77,66 @@ export function ProjectView() {
       addLog(`Loaded ${vids.length} video(s)`)
     })
   }, [id, navigate, addLog])
+
+  const hasProcessing = videos.some((v) => v.status === "processing")
+  useEffect(() => {
+    if (!id || !hasProcessing) return
+    const interval = setInterval(refreshVideosAndSelection, 1500)
+    return () => clearInterval(interval)
+  }, [id, hasProcessing])
+
+  useEffect(() => {
+    if (!selectedVideo || selectedVideo.status !== "processing") return
+    const interval = setInterval(() => setRecordingTick((t) => t + 1), 1000)
+    return () => clearInterval(interval)
+  }, [selectedVideo?.id, selectedVideo?.status])
+
+  // Poll live preview from Docker worker (what the worker is actually recording)
+  useEffect(() => {
+    if (!id || !selectedVideo || selectedVideo.status !== "processing") {
+      if (livePreviewUrl) {
+        URL.revokeObjectURL(livePreviewUrl)
+        setLivePreviewUrl(null)
+      }
+      return
+    }
+    const videoId = selectedVideo.id
+    let revoked = false
+    const poll = async () => {
+      try {
+        const r = await fetch(`/api/projects/${id}/videos/${videoId}/live-preview?_=${Date.now()}`, {
+          credentials: "include",
+          cache: "no-store",
+        })
+        if (revoked) return
+        if (r.status === 200) {
+          const blob = await r.blob()
+          if (revoked) return
+          setLivePreviewUrl((old) => {
+            if (old) URL.revokeObjectURL(old)
+            return URL.createObjectURL(blob)
+          })
+        } else {
+          setLivePreviewUrl((old) => {
+            if (old) URL.revokeObjectURL(old)
+            return null
+          })
+        }
+      } catch {
+        if (!revoked) setLivePreviewUrl((old) => (old ? old : null))
+      }
+    }
+    poll()
+    const interval = setInterval(poll, 800)
+    return () => {
+      revoked = true
+      clearInterval(interval)
+      setLivePreviewUrl((old) => {
+        if (old) URL.revokeObjectURL(old)
+        return null
+      })
+    }
+  }, [id, selectedVideo?.id, selectedVideo?.status])
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
@@ -135,6 +216,56 @@ export function ProjectView() {
       addLog("URL add failed: network error", "error")
     } finally {
       setUrlLoading(false)
+    }
+  }
+
+  async function handleStopRecording(e: React.MouseEvent, video: VideoEntity) {
+    e.stopPropagation()
+    if (!id) return
+    addLog(`Stopping recording ${video.id.slice(0, 8)}...`)
+    setStopping(true)
+    try {
+      const r = await fetch(`/api/projects/${id}/videos/${video.id}/stop`, {
+        method: "POST",
+        credentials: "include",
+      })
+      if (r.ok) {
+        addLog(`Recording will stop and save shortly (worker must be running)`)
+        refreshVideosAndSelection()
+      } else {
+        const err = await r.json().catch(() => ({}))
+        addLog(`Stop failed: ${err.error || r.status}`, "error")
+      }
+    } catch {
+      addLog("Stop failed: network error", "error")
+    } finally {
+      setStopping(false)
+    }
+  }
+
+  async function handleCancelRecording(e: React.MouseEvent, video: VideoEntity) {
+    e.stopPropagation()
+    if (!id) return
+    addLog(`Cancelling recording ${video.id.slice(0, 8)}...`)
+    setCancelling(true)
+    try {
+      const r = await fetch(`/api/projects/${id}/videos/${video.id}/cancel`, {
+        method: "POST",
+        credentials: "include",
+      })
+      if (r.ok) {
+        addLog(`Recording cancelled`)
+        refreshVideosAndSelection()
+        setTimeout(refreshVideosAndSelection, 500)
+        setTimeout(refreshVideosAndSelection, 1500)
+      } else {
+        const err = await r.json().catch(() => ({}))
+        addLog(`Cancel failed: ${err.error || r.status}`, "error")
+      }
+    } catch {
+      addLog("Cancel failed: network error", "error")
+    } finally {
+      setCancelling(false)
     }
   }
 
@@ -219,7 +350,15 @@ export function ProjectView() {
               >
                 <Video className="h-4 w-4 shrink-0 text-muted-foreground" />
                 <span className="flex-1 text-sm truncate min-w-0">
-                  {v.sourceUrl ? `Video ${v.id.slice(0, 8)}` : "No video"}
+                  {v.status === "processing"
+                    ? "Recording..."
+                    : v.status === "cancelled"
+                      ? "Cancelled"
+                      : v.status === "failed"
+                        ? "Failed"
+                        : v.sourceUrl
+                          ? `Video ${v.id.slice(0, 8)}`
+                          : "No video"}
                 </span>
                 <Button
                   variant="ghost"
@@ -311,6 +450,77 @@ export function ProjectView() {
                   )}
                 </Button>
               </form>
+            </div>
+          ) : selectedVideo?.status === "processing" ? (
+            <div className="w-full max-w-4xl flex flex-col gap-2">
+              <div className="relative aspect-video bg-black rounded-lg overflow-hidden shadow-lg">
+                {livePreviewUrl ? (
+                  <img
+                    src={livePreviewUrl}
+                    alt="Live preview from Docker (what is being recorded)"
+                    className="w-full h-full object-contain bg-black"
+                  />
+                ) : (
+                  <div className="w-full h-full flex flex-col items-center justify-center gap-3 bg-muted text-muted-foreground">
+                    <Loader2 className="h-12 w-12 animate-spin" />
+                    <p className="text-sm">Preview from Docker will appear here once the worker starts.</p>
+                  </div>
+                )}
+                <div className="absolute inset-x-0 top-0 flex items-center justify-between gap-2 bg-gradient-to-b from-black/80 to-transparent p-3">
+                  <div className="flex items-center gap-2">
+                    <span className="inline-flex items-center gap-1.5 rounded-md bg-primary/90 px-2.5 py-1 text-sm font-medium text-primary-foreground">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      Recording
+                    </span>
+                    {selectedVideo.createdAt && (
+                      <span className="text-xs text-white/80">
+                        {Math.floor((Date.now() - new Date(selectedVideo.createdAt).getTime()) / 1000)}s
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={(e) => handleStopRecording(e, selectedVideo)}
+                      disabled={stopping || cancelling}
+                      className="gap-1.5"
+                    >
+                      <Square className="h-3.5 w-3.5" />
+                      {stopping ? "Stopping..." : "Stop & Save"}
+                    </Button>
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      onClick={(e) => handleCancelRecording(e, selectedVideo)}
+                      disabled={cancelling || stopping}
+                      className="gap-1.5"
+                    >
+                      <XCircle className="h-3.5 w-3.5" />
+                      {cancelling ? "Cancelling..." : "Cancel"}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+              <p className="text-sm text-muted-foreground text-center">
+                Live preview from the Docker worker (what Chromium in Linux is recording). Video + audio will be saved when the replay ends or after Stop.
+              </p>
+            </div>
+          ) : selectedVideo?.status === "cancelled" ? (
+            <div className="w-full max-w-md text-center">
+              <XCircle className="h-12 w-12 mx-auto mb-2 opacity-50 text-muted-foreground" />
+              <p className="font-medium">Recording cancelled</p>
+              <p className="text-sm text-muted-foreground mt-1">
+                The recording was stopped before completion.
+              </p>
+            </div>
+          ) : selectedVideo?.status === "failed" ? (
+            <div className="w-full max-w-md text-center">
+              <Video className="h-12 w-12 mx-auto mb-2 opacity-50 text-destructive" />
+              <p className="font-medium">Recording failed</p>
+              <p className="text-sm text-muted-foreground mt-1">
+                {selectedVideo.metadata?.error ?? "Unknown error"}
+              </p>
             </div>
           ) : (selectedVideo?.playUrl ?? selectedVideo?.sourceUrl) ? (
             <div className="w-full max-w-4xl aspect-video bg-black rounded-lg overflow-hidden shadow-lg">

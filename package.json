@@ -2,10 +2,11 @@
   "name": "online-game-commenter",
   "private": true,
   "scripts": {
-    "dev": "concurrently -n backend,frontend -c blue,green \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev": "node scripts/dev.mjs",
     "dev:backend": "cd apps/backend && npm run dev",
     "dev:frontend": "cd apps/frontend && npm run dev",
-    "db:push": "cd apps/backend && npm run db:push"
+    "db:push": "cd apps/backend && npm run db:push",
+    "worker": "cd apps/backend && npm run worker"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"

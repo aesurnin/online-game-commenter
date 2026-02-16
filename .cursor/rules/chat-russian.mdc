@@ -1,0 +1,11 @@
+---
+description: Communicate with the user in Russian; keep code, comments, and UI in English
+alwaysApply: true
+---
+
+# Chat Language: Russian
+
+When talking to the user in chat, use **Russian**.
+
+- **Chat messages**: Explanations, answers, instructions — in Russian
+- **Code, comments, UI, API**: Remain in English (see english-only rule)

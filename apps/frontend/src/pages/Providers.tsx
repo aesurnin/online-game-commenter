@@ -89,8 +89,8 @@ export function Providers() {
   if (loading) return <div className="p-8">Loading...</div>
 
   return (
-    <div className="min-h-screen bg-muted/30">
-      <header className="border-b bg-card">
+    <div className="min-h-screen bg-panel-0">
+      <header className="border-b bg-panel-1">
         <div className="flex h-14 items-center justify-between px-4">
           <Button variant="ghost" size="sm" onClick={() => navigate("/dashboard")}>
             ← Dashboard

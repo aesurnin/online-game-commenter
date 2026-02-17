@@ -1,13 +1,15 @@
 import { useEffect } from "react"
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom"
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom"
 import { Login } from "@/pages/Login"
-import { Register } from "@/pages/Register"
 import { Dashboard } from "@/pages/Dashboard"
 import { ProjectView } from "@/pages/ProjectView"
 import { QueueMonitor } from "@/pages/QueueMonitor"
 import { Providers } from "@/pages/Providers"
 import { LogsProvider, useLogs } from "@/contexts/LogsContext"
-import { LogsPanel } from "@/components/LogsPanel"
+import { SelectedVideoProvider } from "@/contexts/SelectedVideoContext"
+import { PreviewVideoProvider } from "@/contexts/PreviewVideoContext"
+import { ThemeProvider } from "@/contexts/ThemeContext"
+import { RightPanel } from "@/components/RightPanel"
 
 function AppInit() {
   const { addLog } = useLogs()
@@ -18,13 +20,15 @@ function AppInit() {
 }
 
 function AppLayout() {
+  const location = useLocation()
+  const showLogsPanel = location.pathname !== "/login"
+
   return (
     <div className="flex h-screen overflow-hidden">
       <AppInit />
       <main className="flex-1 min-w-0 overflow-auto">
         <Routes>
           <Route path="/login" element={<Login />} />
-          <Route path="/register" element={<Register />} />
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/projects/:id" element={<ProjectView />} />
           <Route path="/queue" element={<QueueMonitor />} />
@@ -33,18 +37,24 @@ function AppLayout() {
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>
       </main>
-      <LogsPanel />
+      {showLogsPanel && <RightPanel />}
     </div>
   )
 }
 
 function App() {
   return (
-    <LogsProvider>
-      <BrowserRouter>
-        <AppLayout />
-      </BrowserRouter>
-    </LogsProvider>
+    <ThemeProvider>
+      <LogsProvider>
+        <SelectedVideoProvider>
+          <PreviewVideoProvider>
+            <BrowserRouter>
+              <AppLayout />
+            </BrowserRouter>
+          </PreviewVideoProvider>
+        </SelectedVideoProvider>
+      </LogsProvider>
+    </ThemeProvider>
   )
 }
 

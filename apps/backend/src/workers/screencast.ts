@@ -210,25 +210,61 @@ function startLivePreview(page: { screenshot: (o: { type: string; quality: numbe
   return () => clearInterval(id);
 }
 
-/** Try to get replay-mode from main frame or any child frame. BGaming uses keys like "replay-mode" + hash. */
-async function getReplayModeFromPage(
+/**
+ * Get BGaming freespins data from page.
+ * BGaming stores spin result in sessionStorage under keys like "latestSpinResultV2" + hash.
+ * Value is JSON with features.freespins_left. Also fallback to localStorage "replay-mode".
+ */
+async function getBGamingSpinDataFromPage(
   page: { evaluate: (fn: () => unknown) => Promise<unknown>; frames?: () => { evaluate: (fn: () => unknown) => Promise<unknown> }[] }
-): Promise<string | null> {
+): Promise<{ freespinsLeft: number | undefined; rawValue: string } | null> {
   const frames = page.frames ? page.frames() : [page];
   for (const frame of frames) {
     try {
-      const val = await frame.evaluate(() => {
+      const result = await frame.evaluate(() => {
         try {
+          const ss = (window as any).sessionStorage;
+          if (ss) {
+            for (let i = 0; i < ss.length; i++) {
+              const k = ss.key(i);
+              if (k && (k.includes('latestSpinResult') || k.includes('latestSpinResultV2'))) {
+                const raw = ss.getItem(k);
+                if (raw) {
+                  try {
+                    const obj = JSON.parse(raw) as Record<string, unknown>;
+                    const features = obj?.features as Record<string, unknown> | undefined;
+                    const freespinsLeft = features?.freespins_left as number | undefined;
+                    return { freespinsLeft, rawValue: raw };
+                  } catch { /* skip invalid JSON */ }
+                }
+              }
+            }
+          }
           const ls = (window as any).localStorage;
-          if (!ls) return null;
-          for (let i = 0; i < ls.length; i++) {
-            const k = ls.key(i);
-            if (k && k.startsWith('replay-mode')) return ls.getItem(k);
+          if (ls) {
+            for (let i = 0; i < ls.length; i++) {
+              const k = ls.key(i);
+              if (k && k.startsWith('replay-mode')) {
+                const raw = ls.getItem(k);
+                if (raw) {
+                  try {
+                    const parsed = JSON.parse(raw) as Record<string, unknown>;
+                    const resultKey = Object.keys(parsed).find((key) =>
+                      key.startsWith('latestSpinResult')
+                    );
+                    const spinData = resultKey ? (parsed[resultKey] as Record<string, unknown>) : null;
+                    const features = spinData?.features as Record<string, unknown> | undefined;
+                    const freespinsLeft = features?.freespins_left as number | undefined;
+                    return { freespinsLeft, rawValue: raw };
+                  } catch { /* skip */ }
+                }
+              }
+            }
           }
           return null;
         } catch { return null; }
-      }) as string | null;
-      if (val) return val;
+      }) as { freespinsLeft: number | undefined; rawValue: string } | null;
+      if (result) return result;
     } catch { /* cross-origin or frame gone */ }
   }
   return null;
@@ -252,13 +288,14 @@ async function waitForReplayEnd(
   let lastIdleChange = Date.now();
   const recentConsole: string[] = [];
   const maxConsoleLines = 50;
-  
+  let lastStateLogTime = 0;
+  const STATE_LOG_INTERVAL_MS = 2000;
+
   // Detect BGaming replay URLs
   const isBGamingReplay = jobData.url.includes('bgaming-network.com/api/replays');
   let lastReplayModeValue: string | null = null;
   let lastReplayModeChange = Date.now();
   let freespinsEndedAt: number | null = null;
-  let regularSpinEndedAt: number | null = null;
   let debugLoggedStructure = false;
 
   const consoleHandler = (msg: { text: () => string }) => {
@@ -293,73 +330,56 @@ async function waitForReplayEnd(
           return; 
         }
 
-        // BGaming replay: check if replay ended via localStorage (try main frame + iframes)
+        // BGaming replay: check sessionStorage (latestSpinResultV2) and localStorage (replay-mode)
         if (isBGamingReplay) {
           try {
-            const currentReplayMode = await getReplayModeFromPage(page as Parameters<typeof getReplayModeFromPage>[0]);
-            
-            if (currentReplayMode !== lastReplayModeValue) {
-              lastReplayModeValue = currentReplayMode;
-              lastReplayModeChange = Date.now();
-            }
-            
-            if (currentReplayMode) {
-              try {
-                const parsed = JSON.parse(currentReplayMode) as Record<string, unknown>;
-                const resultKey = Object.keys(parsed).find(k => k.startsWith('latestSpinResult'));
-                const spinData = resultKey ? (parsed[resultKey] as Record<string, unknown>) : null;
-                const features = spinData?.features as Record<string, unknown> | undefined;
-                const freespinsLeft = features?.freespins_left;
-                
-                if (!debugLoggedStructure && elapsed > 5) {
-                  debugLoggedStructure = true;
-                  const keys = Object.keys(parsed).slice(0, 5);
-                  log(`[BGaming] replay-mode keys: ${keys.join(', ')}, resultKey: ${resultKey || 'none'}`);
-                }
-                
-                if (Math.floor(elapsed) % 10 === 0 && Math.floor(elapsed * 2) % 2 === 0) {
-                  log(`[BGaming] freespins_left: ${freespinsLeft ?? 'n/a'}, idle: ${((Date.now() - lastReplayModeChange) / 1000).toFixed(0)}s`);
-                }
-                
-                // Freespins: freespins_left === 0
-                if (freespinsLeft === 0 && freespinsEndedAt === null) {
-                  freespinsEndedAt = Date.now();
-                  log('[AutoStop] BGaming freespins ended (freespins_left === 0), waiting 60s for animations...');
-                }
-                
-                if (freespinsEndedAt !== null) {
-                  const waitMs = Date.now() - freespinsEndedAt;
-                  if (waitMs >= 60000) {
-                    const reason = `BGaming replay ended (waited 60s after freespins_left === 0)`;
-                    log(`[AutoStop] Reason: ${reason}`);
-                    await db.update(videoEntities)
-                      .set({ metadata: { ...((v?.metadata as any) || {}), stopReason: reason } })
-                      .where(eq(videoEntities.id, videoId));
-                    resolve('done');
-                    return;
-                  }
-                }
-                
-                // Regular spin (no freespins): replay-mode stable for 60s + we have spin result = replay done
-                if (freespinsLeft === undefined && resultKey && spinData) {
-                  const idleSinceChange = (Date.now() - lastReplayModeChange) / 1000;
-                  if (idleSinceChange >= 55 && regularSpinEndedAt === null) {
-                    regularSpinEndedAt = Date.now();
-                    log(`[AutoStop] BGaming regular spin: replay-mode stable ${idleSinceChange.toFixed(0)}s, waiting 10s...`);
-                  }
-                  if (regularSpinEndedAt !== null && Date.now() - regularSpinEndedAt >= 10000) {
-                    const reason = `BGaming replay ended (regular spin, stable ${((Date.now() - lastReplayModeChange) / 1000).toFixed(0)}s)`;
-                    log(`[AutoStop] Reason: ${reason}`);
-                    await db.update(videoEntities)
-                      .set({ metadata: { ...((v?.metadata as any) || {}), stopReason: reason } })
-                      .where(eq(videoEntities.id, videoId));
-                    resolve('done');
-                    return;
-                  }
-                }
-              } catch (e) { 
-                log(`[BGaming] Parse error: ${e}`);
+            const spinData = await getBGamingSpinDataFromPage(page as Parameters<typeof getBGamingSpinDataFromPage>[0]);
+
+            if (spinData) {
+              const { freespinsLeft, rawValue } = spinData;
+
+              if (rawValue !== lastReplayModeValue) {
+                lastReplayModeValue = rawValue;
+                lastReplayModeChange = Date.now();
               }
+
+              if (!debugLoggedStructure && elapsed > 5) {
+                debugLoggedStructure = true;
+                log(`[BGaming] freespins_left: ${freespinsLeft ?? 'n/a'} (from sessionStorage/localStorage)`);
+              }
+
+              const idleSec = (Date.now() - lastReplayModeChange) / 1000;
+              const now = Date.now();
+              if (now - lastStateLogTime >= STATE_LOG_INTERVAL_MS) {
+                lastStateLogTime = now;
+                if (freespinsEndedAt !== null) {
+                  const waitSec = (now - freespinsEndedAt) / 1000;
+                  log(`[AutoStop] freespins_left: 0, idle: ${idleSec.toFixed(0)}s | after 0: ${waitSec.toFixed(0)}s/30s`);
+                } else {
+                  log(`[AutoStop] freespins_left: ${freespinsLeft ?? 'n/a'}, idle: ${idleSec.toFixed(0)}s`);
+                }
+              }
+
+              // Freespins: freespins_left === 0
+              if (freespinsLeft === 0 && freespinsEndedAt === null) {
+                freespinsEndedAt = Date.now();
+                log('[AutoStop] BGaming freespins ended (freespins_left === 0), waiting 30s for animations...');
+              }
+
+              if (freespinsEndedAt !== null) {
+                const waitMs = Date.now() - freespinsEndedAt;
+                if (waitMs >= 30000) {
+                  const reason = `BGaming replay ended (waited 30s after freespins_left === 0)`;
+                  log(`[AutoStop] Reason: ${reason}`);
+                  await db.update(videoEntities)
+                    .set({ metadata: { ...((v?.metadata as any) || {}), stopReason: reason } })
+                    .where(eq(videoEntities.id, videoId));
+                  resolve('done');
+                  return;
+                }
+              }
+
+              // Regular spin (no freespins): fall through to idleValueSelector (Idle 40s on total-win per provider)
             }
           } catch (e) { 
             log(`[BGaming] Check error: ${e}`);
@@ -407,6 +427,12 @@ async function waitForReplayEnd(
                 lastIdleChange = Date.now();
               }
               const idleMs = Date.now() - lastIdleChange;
+              const idleSec = idleMs / 1000;
+              const now = Date.now();
+              if (now - lastStateLogTime >= STATE_LOG_INTERVAL_MS) {
+                lastStateLogTime = now;
+                log(`[AutoStop] idleValue: "${current}", unchanged: ${idleSec.toFixed(0)}s / ${idleSeconds}s`);
+              }
               if (idleMs >= idleSeconds * 1000) {
                 const reason = `Idle detection (selector "${idleValueSelector}" unchanged for ${(idleMs / 1000).toFixed(0)}s, value: "${current}")`;
                 log(`[AutoStop] Reason: ${reason}`);
@@ -444,9 +470,30 @@ async function convertWebmToMp4(webmPath: string, mp4Path: string): Promise<bool
   });
 }
 
+function createWorkerLog(videoId: string): (m: string) => void {
+  const prefix = `[${videoId.slice(0, 8)}]`;
+  const logsUrl = BACKEND_URL && PREVIEW_SECRET
+    ? `${BACKEND_URL.replace(/\/$/, '')}/internal/logs/${videoId}`
+    : null;
+  return (m: string) => {
+    const line = `${prefix} ${m}`;
+    console.log(line);
+    if (logsUrl) {
+      fetch(logsUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Preview-Token': PREVIEW_SECRET,
+        },
+        body: JSON.stringify({ message: m }),
+      }).catch(() => {});
+    }
+  };
+}
+
 async function runScreencastJob(jobData: ScreencastJobData): Promise<void> {
   const { projectId, videoId, url, durationLimit = 600, endSelectors, playSelectors } = jobData;
-  const log = (m: string) => console.log(`[${videoId.slice(0, 8)}] ${m}`);
+  const log = createWorkerLog(videoId);
   log('Job started');
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'screencast-'));
   const webmPath = path.join(tmpDir, 'output.webm');

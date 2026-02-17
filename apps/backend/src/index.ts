@@ -6,6 +6,7 @@ import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
 import { lucia } from './lib/auth.js';
 import { isR2Configured } from './lib/r2.js';
+import { seedAuthUsers } from './lib/seed-auth.js';
 
 if (!isR2Configured()) {
   console.error('Fatal: R2 storage is required. Set R2_BUCKET_NAME, R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY in .env');
@@ -49,11 +50,14 @@ import authRoutes from './routes/auth.js';
 import projectsRoutes from './routes/projects.js';
 import providersRoutes from './routes/providers.js';
 import queueRoutes from './routes/queue.js';
+import workflowsRoutes from './routes/workflows.js';
 import { internalRoutes } from './routes/internal.js';
+import { startWorkflowWorker } from './workers/workflow.js';
 server.register(authRoutes, { prefix: '/auth' });
 server.register(projectsRoutes, { prefix: '/projects' });
 server.register(providersRoutes, { prefix: '/providers' });
 server.register(queueRoutes, { prefix: '/queue' });
+server.register(workflowsRoutes, { prefix: '/workflows' });
 server.register(internalRoutes, { prefix: '/internal' });
 
 server.get('/ping', async (request, reply) => {
@@ -82,9 +86,11 @@ async function seedProviderTemplates() {
 
 const start = async () => {
   try {
+    await seedAuthUsers();
     await seedProviderTemplates();
     await server.listen({ port: 3000, host: '0.0.0.0' });
     console.log(`Server listening on ${server.server.address()}`);
+    startWorkflowWorker();
   } catch (err) {
     server.log.error(err);
     process.exit(1);

@@ -9,7 +9,21 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { useLogs } from "@/contexts/LogsContext"
-import { Activity, Clock, XCircle, CheckCircle, Loader2, RefreshCw } from "lucide-react"
+import { Activity, Clock, XCircle, CheckCircle, Loader2, RefreshCw, Trash2 } from "lucide-react"
+
+type JobItem = {
+  id: string
+  type: "screencast" | "workflow"
+  projectId?: string
+  projectName?: string
+  videoId?: string
+  status: string
+  taskLabel?: string
+  url?: string
+  failedReason?: string
+  progress?: number
+  message?: string
+}
 
 type QueueStatus = {
   counts: {
@@ -19,9 +33,10 @@ type QueueStatus = {
     completed: number
     delayed: number
   }
-  waiting: Array<{ id?: string; videoId?: string; url?: string; timestamp?: number }>
-  active: Array<{ id?: string; videoId?: string; url?: string; timestamp?: number }>
-  failed: Array<{ id?: string; videoId?: string; url?: string; timestamp?: number; failedReason?: string }>
+  waiting: JobItem[]
+  active: JobItem[]
+  failed: JobItem[]
+  completed: JobItem[]
   strategy: string
 }
 
@@ -29,8 +44,25 @@ export function QueueMonitor() {
   const [status, setStatus] = useState<QueueStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [killing, setKilling] = useState<string | null>(null)
   const navigate = useNavigate()
   const { addLog } = useLogs()
+
+  async function killJob(jobId: string) {
+    setKilling(jobId)
+    try {
+      const r = await fetch(`/api/queue/jobs/${jobId}/kill`, {
+        method: "POST",
+        credentials: "include",
+      })
+      if (r.ok) fetchStatus()
+      else addLog(`Kill failed: ${r.status}`, "error")
+    } catch (e) {
+      addLog(`Kill failed: ${e}`, "error")
+    } finally {
+      setKilling(null)
+    }
+  }
 
   async function fetchStatus() {
     setLoading(true)
@@ -62,15 +94,15 @@ export function QueueMonitor() {
 
   if (loading && !status) {
     return (
-      <div className="min-h-screen bg-muted/30 flex items-center justify-center">
+      <div className="min-h-screen bg-panel-0 flex items-center justify-center">
         <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
       </div>
     )
   }
 
   return (
-    <div className="min-h-screen bg-muted/30">
-      <header className="border-b bg-card">
+    <div className="min-h-screen bg-panel-0">
+      <header className="border-b bg-panel-1">
         <div className="container mx-auto flex h-14 items-center justify-between px-4">
           <h1 className="font-semibold">Queue Monitor</h1>
           <div className="flex items-center gap-2">
@@ -145,20 +177,39 @@ export function QueueMonitor() {
 
             <div className="grid gap-4 md:grid-cols-3">
               <Card>
-                <CardHeader>
-                  <CardTitle>Active Jobs</CardTitle>
-                  <CardDescription>Currently being recorded</CardDescription>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm">Active Jobs</CardTitle>
+                  <CardDescription className="text-xs">Currently processing</CardDescription>
                 </CardHeader>
                 <CardContent>
                   {status.active.length === 0 ? (
-                    <p className="text-sm text-muted-foreground">None</p>
+                    <p className="text-xs text-muted-foreground">None</p>
                   ) : (
                     <ul className="space-y-2">
                       {status.active.map((j) => (
-                        <li key={j.id} className="flex items-center gap-2 text-sm">
-                          <Activity className="h-4 w-4 shrink-0 text-primary animate-pulse" />
-                          <span className="font-mono">{j.videoId}</span>
-                          <span className="truncate text-muted-foreground">{j.url}</span>
+                        <li key={j.id} className="flex items-start gap-2 text-xs py-1.5 border-b last:border-0">
+                          <Activity className="h-3.5 w-3.5 shrink-0 text-primary animate-pulse mt-0.5" />
+                          <div className="flex-1 min-w-0">
+                            <p className="font-medium truncate">{j.taskLabel ?? j.type}</p>
+                            <p className="text-muted-foreground truncate">
+                              {j.projectName && <span>{j.projectName} · </span>}
+                              {j.videoId?.slice(0, 8) ?? "—"}
+                              {j.url && <span> · {j.url}</span>}
+                            </p>
+                            {j.type === "workflow" && j.progress != null && (
+                              <p className="text-muted-foreground mt-0.5">{j.progress}% {j.message && `· ${j.message}`}</p>
+                            )}
+                          </div>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-6 w-6 shrink-0 text-destructive hover:text-destructive"
+                            onClick={() => killJob(j.id)}
+                            disabled={killing === j.id}
+                            title="Cancel"
+                          >
+                            {killing === j.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
+                          </Button>
                         </li>
                       ))}
                     </ul>
@@ -166,20 +217,36 @@ export function QueueMonitor() {
                 </CardContent>
               </Card>
               <Card>
-                <CardHeader>
-                  <CardTitle>Waiting</CardTitle>
-                  <CardDescription>Queued for processing</CardDescription>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm">Waiting</CardTitle>
+                  <CardDescription className="text-xs">Queued for processing</CardDescription>
                 </CardHeader>
                 <CardContent>
                   {status.waiting.length === 0 ? (
-                    <p className="text-sm text-muted-foreground">None</p>
+                    <p className="text-xs text-muted-foreground">None</p>
                   ) : (
                     <ul className="space-y-2">
                       {status.waiting.map((j) => (
-                        <li key={j.id} className="flex items-center gap-2 text-sm">
-                          <Clock className="h-4 w-4 shrink-0 text-muted-foreground" />
-                          <span className="font-mono">{j.videoId}</span>
-                          <span className="truncate text-muted-foreground">{j.url}</span>
+                        <li key={j.id} className="flex items-start gap-2 text-xs py-1.5 border-b last:border-0">
+                          <Clock className="h-3.5 w-3.5 shrink-0 text-muted-foreground mt-0.5" />
+                          <div className="flex-1 min-w-0">
+                            <p className="font-medium truncate">{j.taskLabel ?? j.type}</p>
+                            <p className="text-muted-foreground truncate">
+                              {j.projectName && <span>{j.projectName} · </span>}
+                              {j.videoId?.slice(0, 8) ?? "—"}
+                              {j.url && <span> · {j.url}</span>}
+                            </p>
+                          </div>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-6 w-6 shrink-0 text-destructive hover:text-destructive"
+                            onClick={() => killJob(j.id)}
+                            disabled={killing === j.id}
+                            title="Cancel"
+                          >
+                            {killing === j.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
+                          </Button>
                         </li>
                       ))}
                     </ul>
@@ -187,21 +254,25 @@ export function QueueMonitor() {
                 </CardContent>
               </Card>
               <Card>
-                <CardHeader>
-                  <CardTitle>Failed</CardTitle>
-                  <CardDescription>Last 50 failed jobs</CardDescription>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm">Failed</CardTitle>
+                  <CardDescription className="text-xs">Last 50 failed jobs</CardDescription>
                 </CardHeader>
                 <CardContent>
                   {status.failed.length === 0 ? (
-                    <p className="text-sm text-muted-foreground">None</p>
+                    <p className="text-xs text-muted-foreground">None</p>
                   ) : (
                     <ul className="space-y-2 max-h-64 overflow-y-auto">
                       {status.failed.map((j) => (
-                        <li key={j.id} className="text-sm border-b pb-2 last:border-0">
-                          <span className="font-mono">{j.videoId}</span>
-                          <p className="text-xs text-muted-foreground truncate">{j.url}</p>
+                        <li key={j.id} className="text-xs border-b py-1.5 last:border-0">
+                          <p className="font-medium truncate">{j.taskLabel ?? j.type}</p>
+                          <p className="text-muted-foreground truncate">
+                            {j.projectName && <span>{j.projectName} · </span>}
+                            {j.videoId?.slice(0, 8) ?? "—"}
+                            {j.url && <span> · {j.url}</span>}
+                          </p>
                           {j.failedReason && (
-                            <p className="text-xs text-destructive mt-1">{j.failedReason}</p>
+                            <p className="text-destructive mt-0.5">{j.failedReason}</p>
                           )}
                         </li>
                       ))}
@@ -210,6 +281,27 @@ export function QueueMonitor() {
                 </CardContent>
               </Card>
             </div>
+            {status.completed.length > 0 && (
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm">Recently Completed</CardTitle>
+                  <CardDescription className="text-xs">Last completed jobs</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <ul className="space-y-2 max-h-48 overflow-y-auto">
+                    {status.completed.map((j) => (
+                      <li key={j.id} className="text-xs border-b py-1.5 last:border-0">
+                        <p className="font-medium truncate">{j.taskLabel ?? j.type}</p>
+                        <p className="text-muted-foreground truncate">
+                          {j.projectName && <span>{j.projectName} · </span>}
+                          {j.videoId?.slice(0, 8) ?? "—"}
+                        </p>
+                      </li>
+                    ))}
+                  </ul>
+                </CardContent>
+              </Card>
+            )}
           </>
         )}
       </main>

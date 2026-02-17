@@ -31,6 +31,7 @@ export const videoEntities = pgTable('video_entity', {
   id: uuid('id').defaultRandom().primaryKey(),
   projectId: uuid('project_id').references(() => projects.id).notNull(),
   status: text('status').default('draft'), // draft, processing, ready, failed
+  displayName: text('display_name'),
   metadata: jsonb('metadata').default({}),
   sourceUrl: text('source_url'),
   previewUrl: text('preview_url'),

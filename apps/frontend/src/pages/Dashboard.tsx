@@ -99,8 +99,8 @@ export function Dashboard() {
   if (!user) return <div className="p-8">Loading...</div>
 
   return (
-    <div className="min-h-screen bg-muted/30">
-      <header className="border-b bg-card">
+    <div className="min-h-screen bg-panel-0">
+      <header className="border-b bg-panel-1">
         <div className="container mx-auto flex h-14 items-center justify-between px-4">
           <h1 className="font-semibold">Video Platform</h1>
           <div className="flex items-center gap-2">

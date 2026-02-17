@@ -8,6 +8,11 @@ export default {
   theme: {
     extend: {
       colors: {
+        "panel-0": "hsl(var(--panel-0))",
+        "panel-1": "hsl(var(--panel-1))",
+        "panel-2": "hsl(var(--panel-2))",
+        "panel-3": "hsl(var(--panel-3))",
+        "panel-logs": "hsl(var(--panel-logs))",
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",
         ring: "hsl(var(--ring))",

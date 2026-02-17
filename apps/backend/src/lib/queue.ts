@@ -23,6 +23,15 @@ export const screencastQueue = new Queue('screencast', {
   },
 });
 
+export const workflowQueue = new Queue('workflow', {
+  connection: { ...redisOpts, maxRetriesPerRequest: null },
+  defaultJobOptions: {
+    attempts: 1,
+    removeOnComplete: { count: 100 },
+    removeOnFail: { count: 50 },
+  },
+});
+
 export type ScreencastJobData = {
   projectId: string;
   videoId: string;
@@ -55,3 +64,21 @@ export async function removeScreencastJobByVideoId(videoId: string): Promise<num
   }
   return removed;
 }
+
+export type WorkflowJobData = {
+  projectId: string;
+  videoId: string;
+  workflowId: string;
+  workflow: { name: string; modules: unknown[] };
+  /** If set, run only this step (0-based). Otherwise run full workflow. */
+  stepIndex?: number;
+  sourceVideoKey: string;
+};
+
+export async function addWorkflowJob(data: WorkflowJobData): Promise<{ id: string }> {
+  const jobName = data.stepIndex != null ? 'step' : 'run';
+  const job = await workflowQueue.add(jobName, data);
+  console.log('[Queue] Added workflow job', job.id, 'workflowId=', data.workflowId, 'stepIndex=', data.stepIndex);
+  return { id: job.id! };
+}
+

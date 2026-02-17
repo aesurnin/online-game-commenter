@@ -2,7 +2,9 @@ import {
   S3Client,
   PutObjectCommand,
   DeleteObjectCommand,
+  DeleteObjectsCommand,
   GetObjectCommand,
+  ListObjectsV2Command,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { NodeHttpHandler } from '@smithy/node-http-handler';
@@ -82,6 +84,33 @@ export async function deleteFromR2(key: string): Promise<void> {
   );
 }
 
+export async function deletePrefixFromR2(prefix: string): Promise<void> {
+  const s3 = getClient();
+  let continuationToken: string | undefined;
+  do {
+    const listRes = await s3.send(
+      new ListObjectsV2Command({
+        Bucket: BUCKET,
+        Prefix: prefix,
+        ContinuationToken: continuationToken,
+      })
+    );
+    const keys = (listRes.Contents ?? []).map((c) => c.Key).filter((k): k is string => !!k);
+    if (keys.length > 0) {
+      await s3.send(
+        new DeleteObjectsCommand({
+          Bucket: BUCKET,
+          Delete: {
+            Objects: keys.map((Key) => ({ Key })),
+            Quiet: true,
+          },
+        })
+      );
+    }
+    continuationToken = listRes.NextContinuationToken;
+  } while (continuationToken);
+}
+
 export async function getPresignedUrl(key: string, expiresIn = 3600): Promise<string> {
   const s3 = getClient();
   const command = new GetObjectCommand({
@@ -89,4 +118,87 @@ export async function getPresignedUrl(key: string, expiresIn = 3600): Promise<st
     Key: key,
   });
   return getSignedUrl(s3, command, { expiresIn });
+}
+
+export async function getObjectFromR2(key: string): Promise<Buffer> {
+  const s3 = getClient();
+  const command = new GetObjectCommand({
+    Bucket: BUCKET,
+    Key: key,
+  });
+  const res = await s3.send(command);
+  const body = res.Body;
+  if (!body) throw new Error(`Empty object: ${key}`);
+  const chunks: Buffer[] = [];
+  for await (const chunk of body as AsyncIterable<Uint8Array>) {
+    chunks.push(Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
+}
+
+export async function listObjectsFromR2(prefix: string): Promise<string[]> {
+  const s3 = getClient();
+  const keys: string[] = [];
+  let continuationToken: string | undefined;
+  do {
+    const res = await s3.send(
+      new ListObjectsV2Command({
+        Bucket: BUCKET,
+        Prefix: prefix,
+        ContinuationToken: continuationToken,
+      })
+    );
+    for (const obj of res.Contents ?? []) {
+      if (obj.Key) keys.push(obj.Key);
+    }
+    continuationToken = res.NextContinuationToken;
+  } while (continuationToken);
+  return keys;
+}
+
+export type R2ObjectMeta = {
+  key: string;
+  size?: number;
+  lastModified?: Date;
+  contentType?: string;
+};
+
+function inferContentType(key: string): string {
+  const ext = key.split('.').pop()?.toLowerCase();
+  const map: Record<string, string> = {
+    mp4: 'video/mp4',
+    webm: 'video/webm',
+    mov: 'video/quicktime',
+    json: 'application/json',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    png: 'image/png',
+  };
+  return map[ext ?? ''] ?? 'application/octet-stream';
+}
+
+export async function listObjectsWithMetaFromR2(prefix: string): Promise<R2ObjectMeta[]> {
+  const s3 = getClient();
+  const result: R2ObjectMeta[] = [];
+  let continuationToken: string | undefined;
+  do {
+    const res = await s3.send(
+      new ListObjectsV2Command({
+        Bucket: BUCKET,
+        Prefix: prefix,
+        ContinuationToken: continuationToken,
+      })
+    );
+    for (const obj of res.Contents ?? []) {
+      if (!obj.Key) continue;
+      result.push({
+        key: obj.Key,
+        size: obj.Size,
+        lastModified: obj.LastModified,
+        contentType: inferContentType(obj.Key),
+      });
+    }
+    continuationToken = res.NextContinuationToken;
+  } while (continuationToken);
+  return result;
 }

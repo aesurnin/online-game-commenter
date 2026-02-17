@@ -1,6 +1,7 @@
 import { FastifyPluginAsync } from 'fastify';
 import { eq } from 'drizzle-orm';
 import { setFrame } from '../lib/live-preview-store.js';
+import { appendVideoLog } from '../lib/video-logs-store.js';
 import { uploadToR2 } from '../lib/r2.js';
 import { db } from '../db/index.js';
 import { videoEntities } from '../db/schema/index.js';
@@ -26,6 +27,17 @@ export const internalRoutes: FastifyPluginAsync = async (fastify) => {
     done(null, body);
   });
 
+  fastify.post<{ Params: { videoId: string }; Body: { message?: string } }>('/logs/:videoId', { logLevel: 'silent' }, async (request, reply) => {
+    if (!PREVIEW_SECRET || request.headers['x-preview-token'] !== PREVIEW_SECRET) {
+      return reply.status(401).send({ error: 'Unauthorized' });
+    }
+    const { videoId } = request.params;
+    const body = request.body as { message?: string } | string;
+    const message = typeof body === 'object' && body?.message ? body.message : (typeof body === 'string' ? body : '');
+    if (message) appendVideoLog(videoId, message);
+    return reply.send({ ok: true });
+  });
+
   fastify.post<{ Params: { videoId: string } }>('/live-preview/:videoId', { logLevel: 'silent' }, async (request, reply) => {
     if (!PREVIEW_SECRET || request.headers['x-preview-token'] !== PREVIEW_SECRET) {
       return reply.status(401).send({ error: 'Unauthorized' });
@@ -48,8 +60,7 @@ export const internalRoutes: FastifyPluginAsync = async (fastify) => {
     if (!body || !Buffer.isBuffer(body)) return reply.status(400).send({ error: 'Expected video body' });
     const ct = request.headers['content-type'] || 'video/webm';
     const ext = ct.includes('mp4') ? '.mp4' : '.webm';
-    const filename = `${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`;
-    const key = `projects/${projectId}/${filename}`;
+    const key = `projects/${projectId}/${videoId}/recording${ext}`;
     await uploadToR2(key, body, ct.includes('mp4') ? 'video/mp4' : 'video/webm');
     await db.update(videoEntities).set({ status: 'ready', sourceUrl: key, metadata: {} }).where(eq(videoEntities.id, videoId));
     return reply.send({ ok: true, key });

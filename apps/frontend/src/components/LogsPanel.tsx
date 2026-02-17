@@ -19,7 +19,7 @@ function formatTime(d: Date) {
   })
 }
 
-export function LogsPanel() {
+export function LogsPanel({ embedded }: { embedded?: boolean } = {}) {
   const { logs, clearLogs } = useLogs()
   const [expanded, setExpanded] = useState(true)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -31,7 +31,7 @@ export function LogsPanel() {
     })
   }, [logs.length])
 
-  if (!expanded) {
+  if (!embedded && !expanded) {
     return (
       <div className="w-10 shrink-0 border-l bg-card flex flex-col items-center py-2">
         <Button
@@ -48,8 +48,8 @@ export function LogsPanel() {
   }
 
   return (
-    <div className="w-80 shrink-0 border-l bg-card flex flex-col min-w-[200px] max-w-[50vw]">
-      <div className="flex items-center justify-between px-2 py-2 border-b">
+    <div className={`flex flex-col flex-1 min-h-0 ${embedded ? "bg-panel-logs" : "w-80 shrink-0 border-l bg-panel-logs min-w-[200px] max-w-[50vw]"}`}>
+      <div className="flex items-center justify-between px-3 pt-3 pb-2 border-b shrink-0">
         <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
           Logs
         </span>
@@ -63,20 +63,22 @@ export function LogsPanel() {
           >
             <Trash2 className="h-3.5 w-3.5" />
           </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7"
-            onClick={() => setExpanded(false)}
-            title="Hide logs"
-          >
-            <PanelRightClose className="h-4 w-4" />
-          </Button>
+          {!embedded && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              onClick={() => setExpanded(false)}
+              title="Hide logs"
+            >
+              <PanelRightClose className="h-4 w-4" />
+            </Button>
+          )}
         </div>
       </div>
       <div
         ref={scrollRef}
-        className="flex-1 overflow-y-auto overflow-x-hidden font-mono text-xs p-2 min-h-[120px]"
+        className="flex-1 overflow-y-auto overflow-x-hidden font-mono text-xs p-3 min-h-[120px]"
       >
         {logs.length === 0 ? (
           <p className="text-muted-foreground py-4 text-center">No logs yet</p>

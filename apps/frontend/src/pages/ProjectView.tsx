@@ -2,12 +2,17 @@ import { useEffect, useState, useRef } from "react"
 import { useNavigate, useParams } from "react-router-dom"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Plus, Trash2, Video, Upload, Link, Loader2, XCircle, Square, RotateCw } from "lucide-react"
+import { Plus, Trash2, Video, Upload, Link, Loader2, XCircle, Square, RotateCw, Pencil } from "lucide-react"
+import { AssetsPanel } from "@/components/AssetsPanel"
+import { UniversalViewer } from "@/components/UniversalViewer"
 import { useLogs } from "@/contexts/LogsContext"
+import { useSelectedVideo } from "@/contexts/SelectedVideoContext"
+import { usePreviewVideo } from "@/contexts/PreviewVideoContext"
 
 type VideoEntity = {
   id: string
   status: string
+  displayName?: string | null
   sourceUrl?: string
   playUrl?: string
   metadata?: { error?: string; stopReason?: string }
@@ -33,15 +38,22 @@ export function ProjectView() {
     consoleEndPatterns: string[]
   } | null>(null)
   const [providerDetecting, setProviderDetecting] = useState(false)
-  const [recordingTick, setRecordingTick] = useState(0)
+  const [, setRecordingTick] = useState(0)
   const [livePreviewUrl, setLivePreviewUrl] = useState<string | null>(null)
   const [cancelling, setCancelling] = useState(false)
   const [stopping, setStopping] = useState(false)
   const [restarting, setRestarting] = useState(false)
   const [durationLimit, setDurationLimit] = useState<number | null>(null)
+  const [editingProjectName, setEditingProjectName] = useState(false)
+  const [editingVideoId, setEditingVideoId] = useState<string | null>(null)
+  const [editingVideoName, setEditingVideoName] = useState("")
+  const [videoToDelete, setVideoToDelete] = useState<VideoEntity | null>(null)
+  const [deleting, setDeleting] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const navigate = useNavigate()
-  const { addLog } = useLogs()
+  const { addLog, setActiveVideoId, fetchLogsForVideo } = useLogs()
+  const { setSelectedVideo: setGlobalSelectedVideo } = useSelectedVideo()
+  const { previewVideo, setPreviewVideo } = usePreviewVideo()
 
   async function fetchProject() {
     if (!id) return
@@ -61,7 +73,7 @@ export function ProjectView() {
   }
 
   function refreshVideosAndSelection() {
-    fetchVideos().then((vids) => {
+    fetchVideos().then((vids: VideoEntity[]) => {
       setVideos(vids)
       setSelectedVideo((prev) => {
         if (!prev) return null
@@ -70,6 +82,17 @@ export function ProjectView() {
       })
     })
   }
+
+  useEffect(() => {
+    setActiveVideoId(selectedVideo?.id ?? null)
+  }, [selectedVideo?.id, setActiveVideoId])
+
+  useEffect(() => {
+    if (!id || !selectedVideo || selectedVideo.status !== "processing") return
+    fetchLogsForVideo(id, selectedVideo.id)
+    const interval = setInterval(() => fetchLogsForVideo(id, selectedVideo.id), 2000)
+    return () => clearInterval(interval)
+  }, [id, selectedVideo?.id, selectedVideo?.status, fetchLogsForVideo])
 
   useEffect(() => {
     if (!id) return
@@ -94,7 +117,7 @@ export function ProjectView() {
     if (!hasProcessing) return
     fetch("/api/config", { credentials: "include" })
       .then((r) => r.ok ? r.json() : {})
-      .then((c) => setDurationLimit(c.durationLimit ?? null))
+      .then((c: { durationLimit?: number }) => setDurationLimit(c.durationLimit ?? null))
       .catch(() => {})
   }, [hasProcessing])
   useEffect(() => {
@@ -108,6 +131,15 @@ export function ProjectView() {
     const interval = setInterval(() => setRecordingTick((t) => t + 1), 1000)
     return () => clearInterval(interval)
   }, [selectedVideo?.id, selectedVideo?.status])
+
+  useEffect(() => {
+    if (!videoToDelete) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setVideoToDelete(null)
+    }
+    window.addEventListener("keydown", onKeyDown)
+    return () => window.removeEventListener("keydown", onKeyDown)
+  }, [videoToDelete])
 
   // Detect provider when URL changes (debounced)
   useEffect(() => {
@@ -223,7 +255,7 @@ export function ProjectView() {
           setVideos((prev) => [...prev, v])
           setSelectedVideo(v)
           setShowAddForm(false)
-          addLog(`Video uploaded: ${v.id.slice(0, 8)}...`)
+          addLog(`Video uploaded: ${v.id.slice(0, 8)}...`, "info", v.id)
         } catch {
           addLog("Failed to parse upload response", "error")
         }
@@ -261,7 +293,7 @@ export function ProjectView() {
         setShowAddForm(false)
         setUrlInput("")
         setProviderMeta(null)
-        addLog(`Video added by URL: ${v.id.slice(0, 8)}...`)
+        addLog(`Video added by URL: ${v.id.slice(0, 8)}...`, "info", v.id)
       } else {
         const err = await r.json().catch(() => ({}))
         addLog(`URL add failed: ${err.error || r.status}`, "error")
@@ -276,7 +308,7 @@ export function ProjectView() {
   async function handleStopRecording(e: React.MouseEvent, video: VideoEntity) {
     e.stopPropagation()
     if (!id) return
-    addLog(`Stopping recording ${video.id.slice(0, 8)}...`)
+    addLog(`Stopping recording ${video.id.slice(0, 8)}...`, "info", video.id)
     setStopping(true)
     try {
       const ctrl = new AbortController()
@@ -302,32 +334,10 @@ export function ProjectView() {
     }
   }
 
-  async function handleCancelRecording(e: React.MouseEvent, video: VideoEntity) {
-    e.stopPropagation()
-    if (!id) return
-    addLog(`Cancelling recording ${video.id.slice(0, 8)}...`)
-    try {
-      const r = await fetch(`/api/projects/${id}/videos/${video.id}/cancel`, {
-        method: "POST",
-        credentials: "include",
-      })
-      if (r.ok) {
-        addLog(`Recording cancelled`)
-        refreshVideosAndSelection()
-      } else {
-        const err = await r.json().catch(() => ({}))
-        addLog(`Cancel failed: ${err.error || r.status}`, "error")
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "network error"
-      addLog(`Cancel failed: ${msg}`, "error")
-    }
-  }
-
   async function handleRestartVideo(e: React.MouseEvent, video: VideoEntity) {
     e.stopPropagation()
     if (!id) return
-    addLog(`Restarting recording ${video.id.slice(0, 8)}...`)
+    addLog(`Restarting recording ${video.id.slice(0, 8)}...`, "info", video.id)
     setRestarting(true)
     try {
       const r = await fetch(`/api/projects/${id}/videos/${video.id}/restart`, {
@@ -352,7 +362,7 @@ export function ProjectView() {
   async function handleCancelRecording(e: React.MouseEvent, video: VideoEntity) {
     e.stopPropagation()
     if (!id) return
-    addLog(`Cancelling recording ${video.id.slice(0, 8)}...`)
+    addLog(`Cancelling recording ${video.id.slice(0, 8)}...`, "info", video.id)
     setCancelling(true)
     try {
       const r = await fetch(`/api/projects/${id}/videos/${video.id}/cancel`, {
@@ -375,27 +385,43 @@ export function ProjectView() {
     }
   }
 
-  async function handleDeleteVideo(e: React.MouseEvent, video: VideoEntity) {
+  function handleDeleteClick(e: React.MouseEvent, video: VideoEntity) {
     e.stopPropagation()
-    if (!id) return
-    addLog(`Deleting video ${video.id.slice(0, 8)}...`)
-    const r = await fetch(`/api/projects/${id}/videos/${video.id}`, {
-      method: "DELETE",
-      credentials: "include",
-    })
-    if (r.ok) {
-      setVideos((prev) => prev.filter((v) => v.id !== video.id))
-      if (selectedVideo?.id === video.id) {
-        setSelectedVideo(null)
+    setVideoToDelete(video)
+  }
+
+  function handleDeleteCancel() {
+    setVideoToDelete(null)
+  }
+
+  async function handleDeleteConfirm() {
+    const video = videoToDelete
+    if (!video || !id) return
+    setDeleting(true)
+    addLog(`Deleting video ${video.id.slice(0, 8)}...`, "info", video.id)
+    try {
+      const r = await fetch(`/api/projects/${id}/videos/${video.id}`, {
+        method: "DELETE",
+        credentials: "include",
+      })
+      if (r.ok) {
+        setVideos((prev) => prev.filter((v) => v.id !== video.id))
+        if (selectedVideo?.id === video.id) {
+          setSelectedVideo(null)
+        }
+        setVideoToDelete(null)
+        addLog(`Video deleted`)
+      } else {
+        addLog(`Delete failed: ${r.status}`, "error")
       }
-      addLog(`Video deleted`)
-    } else {
-      addLog(`Delete failed: ${r.status}`, "error")
+    } finally {
+      setDeleting(false)
     }
   }
 
   function handleAddClick() {
     setSelectedVideo(null)
+    setGlobalSelectedVideo(null)
     setShowAddForm(true)
     addLog("Add video form opened")
   }
@@ -403,14 +429,63 @@ export function ProjectView() {
   function handleVideoClick(video: VideoEntity) {
     setSelectedVideo(video)
     setShowAddForm(false)
-    addLog(`Selected video ${video.id.slice(0, 8)}`)
+    setPreviewVideo(null)
+    if (id) {
+      setGlobalSelectedVideo({
+        projectId: id,
+        videoId: video.id,
+        sourceUrl: video.sourceUrl,
+      })
+    }
+    addLog(`Selected video ${video.id.slice(0, 8)}`, "info", video.id)
+  }
+
+  async function handleRenameProject(newName: string) {
+    if (!id || !newName.trim()) return
+    const r = await fetch(`/api/projects/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: newName.trim() }),
+      credentials: "include",
+    })
+    if (r.ok) {
+      setProject((p) => (p ? { ...p, name: newName.trim() } : p))
+      setEditingProjectName(false)
+    }
+  }
+
+  async function handleRenameVideo(video: VideoEntity, newName: string) {
+    if (!id) return
+    const r = await fetch(`/api/projects/${id}/videos/${video.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ displayName: newName.trim() || null }),
+      credentials: "include",
+    })
+    if (r.ok) {
+      setVideos((prev) =>
+        prev.map((v) =>
+          v.id === video.id ? { ...v, displayName: newName.trim() || null } : v
+        )
+      )
+      setEditingVideoId(null)
+    }
+  }
+
+  function getVideoLabel(v: VideoEntity) {
+    if (v.displayName?.trim()) return v.displayName
+    if (v.status === "processing") return "Recording..."
+    if (v.status === "cancelled") return "Cancelled"
+    if (v.status === "failed") return "Failed"
+    if (v.sourceUrl) return `Video ${v.id.slice(0, 8)}`
+    return "No video"
   }
 
   if (!project) return <div className="p-8">Loading...</div>
 
   return (
-    <div className="min-h-screen bg-muted/30 flex flex-col">
-      <header className="border-b bg-card shrink-0">
+    <div className="min-h-screen bg-panel-0 flex flex-col">
+      <header className="border-b bg-panel-1 shrink-0">
         <div className="flex h-14 items-center justify-between px-4">
           <div className="flex items-center gap-4">
             <Button
@@ -429,15 +504,38 @@ export function ProjectView() {
             <Button variant="ghost" size="sm" onClick={() => navigate("/providers")}>
               Providers
             </Button>
-            <h1 className="font-semibold">{project.name}</h1>
+            {editingProjectName ? (
+              <Input
+                className="h-8 w-48 font-semibold"
+                defaultValue={project.name}
+                autoFocus
+                onBlur={(e) => {
+                  handleRenameProject(e.target.value)
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    handleRenameProject((e.target as HTMLInputElement).value)
+                  }
+                  if (e.key === "Escape") setEditingProjectName(false)
+                }}
+              />
+            ) : (
+              <h1
+                className="font-semibold cursor-pointer hover:bg-muted/50 rounded px-2 py-1 flex items-center gap-1"
+                onClick={() => setEditingProjectName(true)}
+              >
+                {project.name}
+                <Pencil className="h-3.5 w-3.5 text-muted-foreground" />
+              </h1>
+            )}
           </div>
         </div>
       </header>
 
       <div className="flex flex-1 min-h-0">
         {/* Asset bar — left */}
-        <aside className="w-56 shrink-0 border-r bg-card flex flex-col">
-          <div className="p-2 flex items-center justify-between border-b">
+        <aside className="w-56 shrink-0 border-r bg-panel-1 flex flex-col">
+          <div className="px-3 pt-3 pb-2 flex items-center justify-between border-b shrink-0">
             <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
               Videos
             </span>
@@ -461,17 +559,32 @@ export function ProjectView() {
                 onClick={() => handleVideoClick(v)}
               >
                 <Video className="h-4 w-4 shrink-0 text-muted-foreground" />
-                <span className="flex-1 text-sm truncate min-w-0">
-                  {v.status === "processing"
-                    ? "Recording..."
-                    : v.status === "cancelled"
-                      ? "Cancelled"
-                      : v.status === "failed"
-                        ? "Failed"
-                        : v.sourceUrl
-                          ? `Video ${v.id.slice(0, 8)}`
-                          : "No video"}
-                </span>
+                {editingVideoId === v.id ? (
+                  <Input
+                    className="h-6 flex-1 text-sm min-w-0"
+                    value={editingVideoName}
+                    onChange={(e) => setEditingVideoName(e.target.value)}
+                    onClick={(e) => e.stopPropagation()}
+                    onBlur={() => handleRenameVideo(v, editingVideoName)}
+                    onKeyDown={(e) => {
+                      e.stopPropagation()
+                      if (e.key === "Enter") handleRenameVideo(v, editingVideoName)
+                      if (e.key === "Escape") setEditingVideoId(null)
+                    }}
+                    autoFocus
+                  />
+                ) : (
+                  <span
+                    className="flex-1 text-sm truncate min-w-0"
+                    onDoubleClick={(e) => {
+                      e.stopPropagation()
+                      setEditingVideoId(v.id)
+                      setEditingVideoName(v.displayName || "")
+                    }}
+                  >
+                    {getVideoLabel(v)}
+                  </span>
+                )}
                 {v.status === "failed" && (
                   <Button
                     variant="ghost"
@@ -488,7 +601,7 @@ export function ProjectView() {
                   variant="ghost"
                   size="icon"
                   className="h-6 w-6 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
-                  onClick={(e) => handleDeleteVideo(e, v)}
+                  onClick={(e) => handleDeleteClick(e, v)}
                   title="Delete"
                 >
                   <Trash2 className="h-3.5 w-3.5 text-destructive" />
@@ -498,8 +611,44 @@ export function ProjectView() {
           </div>
         </aside>
 
+        {/* Assets — between videos list and video player */}
+        {selectedVideo && !showAddForm && (
+          <aside className="w-64 shrink-0 border-r bg-panel-2 flex flex-col min-h-0">
+            <AssetsPanel />
+          </aside>
+        )}
+
         {/* Center area — preview or upload form */}
-        <main className="flex-1 flex items-center justify-center p-6 min-h-0 bg-muted/20">
+        <main className="flex-1 flex flex-col min-h-0 bg-panel-0">
+          {selectedVideo && !showAddForm && (
+            <div className="w-full max-w-4xl mx-auto px-6 pt-3 pb-2 flex items-center gap-2 shrink-0">
+              {editingVideoId === selectedVideo.id ? (
+                <Input
+                  className="h-8 flex-1 font-medium"
+                  value={editingVideoName}
+                  onChange={(e) => setEditingVideoName(e.target.value)}
+                  onBlur={() => handleRenameVideo(selectedVideo, editingVideoName)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handleRenameVideo(selectedVideo, editingVideoName)
+                    if (e.key === "Escape") setEditingVideoId(null)
+                  }}
+                  autoFocus
+                />
+              ) : (
+                <div
+                  className="flex items-center gap-2 cursor-pointer hover:bg-muted/50 rounded px-2 py-1 -mx-2"
+                  onClick={() => {
+                    setEditingVideoId(selectedVideo.id)
+                    setEditingVideoName(selectedVideo.displayName || "")
+                  }}
+                >
+                  <span className="font-medium">{getVideoLabel(selectedVideo)}</span>
+                  <Pencil className="h-3.5 w-3.5 text-muted-foreground" />
+                </div>
+              )}
+            </div>
+          )}
+          <div className="flex-1 flex items-center justify-center p-6 min-h-0 min-w-0 overflow-auto">
           {showAddForm ? (
             <div className="w-full max-w-md space-y-6">
               <h3 className="font-medium text-center">Add video</h3>
@@ -682,6 +831,8 @@ export function ProjectView() {
                 Restart
               </Button>
             </div>
+          ) : previewVideo?.url ? (
+            <UniversalViewer asset={previewVideo} onClose={() => setPreviewVideo(null)} />
           ) : (selectedVideo?.playUrl ?? selectedVideo?.sourceUrl) ? (
             <div className="w-full max-w-4xl space-y-2">
               <div className="aspect-video bg-black rounded-lg overflow-hidden shadow-lg">
@@ -710,12 +861,50 @@ export function ProjectView() {
               <Plus className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
               <p className="text-muted-foreground mb-2">No video selected</p>
               <p className="text-sm text-muted-foreground">
-                Click «+» on the left or here to add a video
-              </p>
-            </div>
-          )}
+              Click «+» on the left or here to add a video
+            </p>
+          </div>
+        )}
+          </div>
         </main>
       </div>
+
+      {/* Delete confirmation dialog */}
+      {videoToDelete && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+          onClick={handleDeleteCancel}
+        >
+          <div
+            className="rounded-lg border bg-card p-6 shadow-lg max-w-md mx-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="font-semibold text-lg mb-2">Delete video?</h3>
+            <p className="text-muted-foreground text-sm mb-4">
+              Are you sure you want to delete &quot;{getVideoLabel(videoToDelete)}&quot;? This action cannot be undone.
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={handleDeleteCancel} disabled={deleting}>
+                Cancel
+              </Button>
+              <Button
+                variant="destructive"
+                onClick={handleDeleteConfirm}
+                disabled={deleting}
+              >
+                {deleting ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                    Deleting...
+                  </>
+                ) : (
+                  "Delete"
+                )}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

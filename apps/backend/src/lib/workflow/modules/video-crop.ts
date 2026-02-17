@@ -3,30 +3,59 @@ import fs from 'fs/promises';
 import path from 'path';
 import type { WorkflowContext, WorkflowModule, ModuleRunResult } from '../types.js';
 
+async function getVideoDimensions(inputPath: string): Promise<{ width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('ffprobe', [
+      '-v', 'error',
+      '-select_streams', 'v:0',
+      '-show_entries', 'stream=width,height',
+      '-of', 'csv=p=0',
+      '-i', inputPath,
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    proc.stdout?.on('data', (c) => { out += c.toString(); });
+    proc.on('error', reject);
+    proc.on('close', (code) => {
+      if (code !== 0) return reject(new Error(`ffprobe exited ${code}`));
+      const [width, height] = out.trim().split(',').map(Number);
+      if (!width || !height) return reject(new Error('Could not parse dimensions'));
+      resolve({ width, height });
+    });
+  });
+}
+
 export const videoCropMeta = {
   type: 'video.crop',
   label: 'Crop Video',
-  description: 'Crop video to specific dimensions',
-  quickParams: ['width', 'height'],
+  description: 'Crop video by percentage (4 edges: left, top, right, bottom)',
+  quickParams: ['left', 'top', 'right', 'bottom'],
   inputSlots: [{ key: 'video', label: 'Video', kind: 'video' as const }],
   outputSlots: [{ key: 'video', label: 'Video', kind: 'video' as const }],
   paramsSchema: [
-    { key: 'x', label: 'X (Left)', type: 'number' as const, default: 0, min: 0 },
-    { key: 'y', label: 'Y (Top)', type: 'number' as const, default: 0, min: 0 },
-    { key: 'width', label: 'Width', type: 'number' as const, default: 1920, min: 0 },
-    { key: 'height', label: 'Height', type: 'number' as const, default: 1080, min: 0 },
+    { key: 'left', label: 'Left margin (%)', type: 'number' as const, default: 0, min: 0, max: 100 },
+    { key: 'top', label: 'Top margin (%)', type: 'number' as const, default: 0, min: 0, max: 100 },
+    { key: 'right', label: 'Right margin (%)', type: 'number' as const, default: 0, min: 0, max: 100 },
+    { key: 'bottom', label: 'Bottom margin (%)', type: 'number' as const, default: 0, min: 0, max: 100 },
   ],
 };
+
+/** Params: left, top, right, bottom = margin % from each edge (0–100). */
+function paramsToLtwh(params: Record<string, unknown>): { left: number; top: number; width: number; height: number } {
+  const left = Math.max(0, Math.min(100, Number(params.left) ?? 0));
+  const top = Math.max(0, Math.min(100, Number(params.top) ?? 0));
+  const right = Math.max(0, Math.min(100, Number(params.right) ?? 0));
+  const bottom = Math.max(0, Math.min(100, Number(params.bottom) ?? 0));
+  const width = Math.max(0, 100 - left - right);
+  const height = Math.max(0, 100 - top - bottom);
+  return { left, top, width, height };
+}
 
 export class VideoCropModule implements WorkflowModule {
   readonly meta = videoCropMeta;
 
   async run(context: WorkflowContext, params: Record<string, unknown>): Promise<ModuleRunResult> {
-    const x = Math.max(0, Number(params.x) ?? 0);
-    const y = Math.max(0, Number(params.y) ?? 0);
-    const w = Math.max(0, Number(params.width) ?? 0);
-    const h = Math.max(0, Number(params.height) ?? 0);
-    
+    const { left: leftPct, top: topPct, width: widthPct, height: heightPct } = paramsToLtwh(params);
+
     const { onProgress, onLog } = context;
     const inputPath = context.currentVideoPath;
 
@@ -36,11 +65,30 @@ export class VideoCropModule implements WorkflowModule {
       return { success: false, error: `Input video not found: ${inputPath}` };
     }
 
-    if (w === 0 || h === 0) {
-       return { success: false, error: `Invalid crop dimensions: ${w}x${h}` };
+    if (widthPct < 0.1 || heightPct < 0.1) {
+      return { success: false, error: `Invalid crop: width=${widthPct}% height=${heightPct}%` };
     }
 
-    onLog?.(`Starting crop: x=${x}, y=${y}, w=${w}, h=${h}`);
+    let width: number;
+    let height: number;
+    try {
+      const dims = await getVideoDimensions(inputPath);
+      width = dims.width;
+      height = dims.height;
+    } catch (e) {
+      return { success: false, error: `Could not get video dimensions: ${e}` };
+    }
+
+    const x = Math.round((leftPct / 100) * width) & ~1;
+    const y = Math.round((topPct / 100) * height) & ~1;
+    const w = Math.round((widthPct / 100) * width) & ~1;
+    const h = Math.round((heightPct / 100) * height) & ~1;
+
+    if (w <= 0 || h <= 0) {
+      return { success: false, error: `Invalid crop dimensions: ${w}x${h}` };
+    }
+
+    onLog?.(`Crop: ${leftPct}%,${topPct}% ${widthPct}%x${heightPct}% -> ${x},${y} ${w}x${h}px`);
     onProgress?.(0, 'Preparing');
 
     const ext = path.extname(inputPath) || '.mp4';

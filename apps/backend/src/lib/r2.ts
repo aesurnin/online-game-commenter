@@ -136,6 +136,40 @@ export async function getObjectFromR2(key: string): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
+export type StreamObjectResult = {
+  body: AsyncIterable<Uint8Array>;
+  contentLength: number;
+  contentType: string;
+  contentRange?: string;
+  statusCode: 200 | 206;
+};
+
+export async function streamObjectFromR2(
+  key: string,
+  range?: string
+): Promise<StreamObjectResult> {
+  const s3 = getClient();
+  const command = new GetObjectCommand({
+    Bucket: BUCKET,
+    Key: key,
+    ...(range && { Range: range }),
+  });
+  const res = await s3.send(command);
+  const body = res.Body;
+  if (!body) throw new Error(`Empty object: ${key}`);
+  const contentLength = res.ContentLength ?? 0;
+  const contentType = (res.ContentType as string) || inferContentType(key);
+  const contentRange = res.ContentRange as string | undefined;
+  const statusCode = range && contentRange ? 206 : 200;
+  return {
+    body: body as AsyncIterable<Uint8Array>,
+    contentLength,
+    contentType,
+    contentRange,
+    statusCode,
+  };
+}
+
 export async function listObjectsFromR2(prefix: string): Promise<string[]> {
   const s3 = getClient();
   const keys: string[] = [];

@@ -4,7 +4,7 @@ import { db } from '../db/index.js';
 import { projects, providerTemplates, videoEntities } from '../db/schema/index.js';
 import { and, eq } from 'drizzle-orm';
 import z from 'zod';
-import { uploadToR2, deleteFromR2, deletePrefixFromR2, getPresignedUrl, listObjectsWithMetaFromR2 } from '../lib/r2.js';
+import { uploadToR2, deleteFromR2, deletePrefixFromR2, getPresignedUrl, listObjectsWithMetaFromR2, streamObjectFromR2 } from '../lib/r2.js';
 import fs from 'fs';
 import { cleanupWorkflowModuleCache, ensureWorkflowModuleCacheDirs, listWorkflowModuleCache, listWorkflowCacheFolderContents, getWorkflowCacheFilePath } from '../lib/workflow/runner.js';
 import { addScreencastJob, removeScreencastJobByVideoId } from '../lib/queue.js';
@@ -76,6 +76,7 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
               v.sourceUrl,
               3600
             );
+            (out as Record<string, unknown>).streamUrl = `/api/projects/${id}/videos/${v.id}/stream`;
           } catch {
             // skip playUrl on error
           }
@@ -84,6 +85,44 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
       })
     );
     return reply.send(withUrls);
+  });
+
+  /** Stream video from R2 with Range support (for seeking without full download) */
+  fastify.get<{ Params: { id: string; videoId: string } }>('/:id/videos/:videoId/stream', async (request, reply) => {
+    const { id, videoId } = request.params;
+    const project = await db.query.projects.findFirst({
+      where: (p, { and, eq }) => and(eq(p.id, id), eq(p.ownerId, request.user!.id)),
+    });
+    if (!project) return reply.status(404).send({ error: 'Not found' });
+
+    const [video] = await db.select()
+      .from(videoEntities)
+      .where(and(eq(videoEntities.id, videoId), eq(videoEntities.projectId, id)));
+    if (!video) return reply.status(404).send({ error: 'Video not found' });
+
+    const sourceKey = video.sourceUrl;
+    if (!sourceKey?.startsWith('projects/')) {
+      return reply.status(400).send({ error: 'Video has no R2 source' });
+    }
+
+    const rangeHeader = request.headers.range;
+    try {
+      const { body, contentLength, contentType, contentRange, statusCode } = await streamObjectFromR2(
+        sourceKey,
+        rangeHeader
+      );
+
+      reply.status(statusCode);
+      reply.header('Content-Type', contentType);
+      reply.header('Content-Length', String(contentLength));
+      reply.header('Accept-Ranges', 'bytes');
+      if (contentRange) reply.header('Content-Range', contentRange);
+
+      return reply.send(body);
+    } catch (err) {
+      request.log.error(err);
+      return reply.status(500).send({ error: 'Failed to stream video' });
+    }
   });
 
   fastify.post('/:id/videos/upload', async (request, reply) => {

@@ -1,13 +1,17 @@
 import { useEffect, useState, useRef } from "react"
 import { useNavigate, useParams } from "react-router-dom"
+import { Group, Panel, Separator } from "react-resizable-panels"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Plus, Trash2, Video, Upload, Link, Loader2, XCircle, Square, RotateCw, Pencil } from "lucide-react"
+import { Plus, Trash2, Video, Upload, Link, Loader2, XCircle, Square, RotateCw } from "lucide-react"
 import { AssetsPanel } from "@/components/AssetsPanel"
 import { UniversalViewer } from "@/components/UniversalViewer"
 import { useLogs } from "@/contexts/LogsContext"
 import { useSelectedVideo } from "@/contexts/SelectedVideoContext"
 import { usePreviewVideo } from "@/contexts/PreviewVideoContext"
+
+const PROJECT_LAYOUT_STORAGE_KEY = "project-layout-videos-assets-main"
+const PROJECT_PANELS_VISIBLE_KEY = "project-panels-visible"
 
 type VideoEntity = {
   id: string
@@ -15,11 +19,19 @@ type VideoEntity = {
   displayName?: string | null
   sourceUrl?: string
   playUrl?: string
+  /** Streaming URL (Range support, no full download) */
+  streamUrl?: string
   metadata?: { error?: string; stopReason?: string }
   createdAt?: string
 }
 
-export function ProjectView() {
+export function ProjectView({
+  videosVisible = true,
+  assetsVisible = true,
+}: {
+  videosVisible?: boolean
+  assetsVisible?: boolean
+} = {}) {
   const { id } = useParams<{ id: string }>()
   const [project, setProject] = useState<{ id: string; name: string } | null>(null)
   const [videos, setVideos] = useState<VideoEntity[]>([])
@@ -44,13 +56,43 @@ export function ProjectView() {
   const [stopping, setStopping] = useState(false)
   const [restarting, setRestarting] = useState(false)
   const [durationLimit, setDurationLimit] = useState<number | null>(null)
-  const [editingProjectName, setEditingProjectName] = useState(false)
   const [editingVideoId, setEditingVideoId] = useState<string | null>(null)
   const [editingVideoName, setEditingVideoName] = useState("")
   const [videoToDelete, setVideoToDelete] = useState<VideoEntity | null>(null)
   const [deleting, setDeleting] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const navigate = useNavigate()
+
+  const savedLayout = ((): { videos: number; assets: number; main: number } => {
+    const defaults = { videos: 20, assets: 20, main: 60 }
+    try {
+      const s = localStorage.getItem(PROJECT_LAYOUT_STORAGE_KEY)
+      if (s) {
+        const parsed = JSON.parse(s) as { videos?: number; assets?: number; main?: number }
+        if (
+          typeof parsed.videos === "number" &&
+          typeof parsed.assets === "number" &&
+          typeof parsed.main === "number" &&
+          parsed.videos >= 10 &&
+          parsed.assets >= 10 &&
+          parsed.main >= 25
+        ) {
+          return { videos: parsed.videos, assets: parsed.assets, main: parsed.main }
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+    return defaults
+  })()
+
+  const layout = (() => {
+    const { videos: v, assets: a, main: m } = savedLayout
+    if (!videosVisible && !assetsVisible) return { main: 100 } as Record<string, number>
+    if (!videosVisible) return { assets: a, main: 100 - a }
+    if (!assetsVisible) return { videos: v, main: 100 - v }
+    return { videos: v, assets: a, main: m }
+  })()
   const { addLog, setActiveVideoId, fetchLogsForVideo } = useLogs()
   const { setSelectedVideo: setGlobalSelectedVideo } = useSelectedVideo()
   const { previewVideo, setPreviewVideo } = usePreviewVideo()
@@ -435,6 +477,8 @@ export function ProjectView() {
         projectId: id,
         videoId: video.id,
         sourceUrl: video.sourceUrl,
+        playUrl: video.playUrl,
+        streamUrl: video.streamUrl,
       })
     }
     addLog(`Selected video ${video.id.slice(0, 8)}`, "info", video.id)
@@ -484,72 +528,46 @@ export function ProjectView() {
   if (!project) return <div className="p-8">Loading...</div>
 
   return (
-    <div className="min-h-screen bg-panel-0 flex flex-col">
-      <header className="border-b bg-panel-1 shrink-0">
-        <div className="flex h-14 items-center justify-between px-4">
-          <div className="flex items-center gap-4">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => {
-                addLog("Navigating to dashboard")
-                navigate("/dashboard")
-              }}
-            >
-              ← Dashboard
-            </Button>
-            <Button variant="ghost" size="sm" onClick={() => navigate("/queue")}>
-              Queue
-            </Button>
-            <Button variant="ghost" size="sm" onClick={() => navigate("/providers")}>
-              Providers
-            </Button>
-            {editingProjectName ? (
-              <Input
-                className="h-8 w-48 font-semibold"
-                defaultValue={project.name}
-                autoFocus
-                onBlur={(e) => {
-                  handleRenameProject(e.target.value)
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    handleRenameProject((e.target as HTMLInputElement).value)
-                  }
-                  if (e.key === "Escape") setEditingProjectName(false)
-                }}
-              />
-            ) : (
-              <h1
-                className="font-semibold cursor-pointer hover:bg-muted/50 rounded px-2 py-1 flex items-center gap-1"
-                onClick={() => setEditingProjectName(true)}
-              >
-                {project.name}
-                <Pencil className="h-3.5 w-3.5 text-muted-foreground" />
-              </h1>
-            )}
-          </div>
-        </div>
-      </header>
-
-      <div className="flex flex-1 min-h-0">
-        {/* Asset bar — left */}
-        <aside className="w-56 shrink-0 border-r bg-panel-1 flex flex-col">
-          <div className="px-3 pt-3 pb-2 flex items-center justify-between border-b shrink-0">
-            <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-              Videos
-            </span>
+    <div className="h-full bg-panel-0 flex flex-col">
+      <Group
+          key={`${videosVisible}-${assetsVisible}`}
+          id="project-videos-assets-main"
+          orientation="horizontal"
+          className="flex-1 min-h-0"
+          defaultLayout={layout}
+          resizeTargetMinimumSize={{ coarse: 24, fine: 6 }}
+          onLayoutChanged={(l) => {
+            const next = { ...savedLayout }
+            if (typeof l.videos === "number" && videosVisible) next.videos = l.videos
+            if (typeof l.assets === "number" && assetsVisible) next.assets = l.assets
+            if (typeof l.main === "number") next.main = l.main
+            localStorage.setItem(PROJECT_LAYOUT_STORAGE_KEY, JSON.stringify(next))
+          }}
+        >
+          {videosVisible && (
+            <>
+          <Panel
+            id="videos"
+            defaultSize={`${layout.videos}%`}
+            minSize="15%"
+            maxSize="35%"
+            collapsible
+            collapsedSize={0}
+            className="min-w-0 flex flex-col border-r border-border bg-panel-1"
+          >
+          <div className="flex items-center justify-between px-2 py-2 border-b border-border/50 shrink-0" style={{ height: 32 }}>
+            <span className="text-xs text-muted-foreground/70 font-medium">VIDEOS</span>
             <Button
               variant="ghost"
               size="icon"
-              className="h-7 w-7"
+              className="h-6 w-6"
               onClick={handleAddClick}
               title="Add video"
             >
-              <Plus className="h-4 w-4" />
+              <Plus className="h-3.5 w-3.5" />
             </Button>
           </div>
-          <div className="flex-1 overflow-y-auto p-1">
+          <div className="flex-1 overflow-y-auto p-1.5 min-h-0">
             {videos.map((v) => (
               <div
                 key={v.id}
@@ -609,17 +627,32 @@ export function ProjectView() {
               </div>
             ))}
           </div>
-        </aside>
-
-        {/* Assets — between videos list and video player */}
-        {selectedVideo && !showAddForm && (
-          <aside className="w-64 shrink-0 border-r bg-panel-2 flex flex-col min-h-0">
-            <AssetsPanel />
-          </aside>
-        )}
-
-        {/* Center area — preview or upload form */}
-        <main className="flex-1 flex flex-col min-h-0 bg-panel-0">
+        </Panel>
+        <Separator className="shrink-0" />
+            </>
+          )}
+          {assetsVisible && (
+            <>
+        <Panel
+          id="assets"
+            defaultSize={`${layout.assets}%`}
+            minSize="15%"
+          maxSize="35%"
+          collapsible
+          collapsedSize={0}
+          className="min-w-0 flex flex-col border-r border-border bg-panel-1"
+        >
+          <div className="flex items-center justify-between px-2 py-2 border-b border-border/50 shrink-0" style={{ height: 32 }}>
+            <span className="text-xs text-muted-foreground/70 font-medium">ASSETS</span>
+          </div>
+          <div className="flex-1 min-h-0 overflow-hidden">
+            <AssetsPanel hideHeader />
+          </div>
+        </Panel>
+        <Separator className="shrink-0" />
+            </>
+          )}
+        <Panel id="main" defaultSize={`${layout.main}%`} minSize="25%" className="min-w-0 flex flex-col bg-panel-0">
           {selectedVideo && !showAddForm && (
             <div className="w-full max-w-4xl mx-auto px-6 pt-3 pb-2 flex items-center gap-2 shrink-0">
               {editingVideoId === selectedVideo.id ? (
@@ -833,11 +866,11 @@ export function ProjectView() {
             </div>
           ) : previewVideo?.url ? (
             <UniversalViewer asset={previewVideo} onClose={() => setPreviewVideo(null)} />
-          ) : (selectedVideo?.playUrl ?? selectedVideo?.sourceUrl) ? (
+          ) : (selectedVideo?.streamUrl ?? selectedVideo?.playUrl ?? selectedVideo?.sourceUrl) ? (
             <div className="w-full max-w-4xl space-y-2">
               <div className="aspect-video bg-black rounded-lg overflow-hidden shadow-lg">
                 <video
-                  src={selectedVideo!.playUrl ?? selectedVideo!.sourceUrl}
+                  src={selectedVideo!.streamUrl ?? selectedVideo!.playUrl ?? selectedVideo!.sourceUrl}
                   controls
                   className="w-full h-full object-contain"
                 />
@@ -866,8 +899,8 @@ export function ProjectView() {
           </div>
         )}
           </div>
-        </main>
-      </div>
+        </Panel>
+      </Group>
 
       {/* Delete confirmation dialog */}
       {videoToDelete && (

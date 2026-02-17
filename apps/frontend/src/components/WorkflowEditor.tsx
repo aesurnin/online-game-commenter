@@ -86,6 +86,8 @@ const defaultVideoState = (): VideoWorkflowState => ({
 
 const CACHE_KEY_PREFIX = "workflow-cache"
 const MAX_CACHED_LOGS = 500
+const AUTOSAVE_KEY = "workflow-editor-autosave"
+const AUTOSAVE_DEBOUNCE_MS = 2000
 
 function getCacheKey(projectId: string, videoId: string) {
   return `${CACHE_KEY_PREFIX}:${projectId}:${videoId}`
@@ -133,6 +135,13 @@ export function WorkflowEditor() {
   const [expandedModuleIndex, setExpandedModuleIndex] = useState<number | null>(null)
   const [cropModalOpen, setCropModalOpen] = useState(false)
   const [cropModuleIndex, setCropModuleIndex] = useState<number | null>(null)
+  const [autoSave, setAutoSave] = useState(() => {
+    try {
+      return localStorage.getItem(AUTOSAVE_KEY) !== "false"
+    } catch {
+      return true
+    }
+  })
   const addStepPopoverRef = useRef<HTMLDivElement>(null)
 
   const projectId = selectedVideo?.projectId
@@ -332,6 +341,27 @@ export function WorkflowEditor() {
     },
     [workflow, addLog, fetchWorkflows]
   )
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(AUTOSAVE_KEY, String(autoSave))
+    } catch {
+      // ignore
+    }
+  }, [autoSave])
+
+  const autoSaveRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    if (!autoSave || !currentWorkflowId || !workflow) return
+    if (autoSaveRef.current) clearTimeout(autoSaveRef.current)
+    autoSaveRef.current = setTimeout(() => {
+      autoSaveRef.current = null
+      saveWorkflow(currentWorkflowId)
+    }, AUTOSAVE_DEBOUNCE_MS)
+    return () => {
+      if (autoSaveRef.current) clearTimeout(autoSaveRef.current)
+    }
+  }, [autoSave, currentWorkflowId, workflow, saveWorkflow])
 
   const createNewWorkflow = () => {
     if (!videoId) return
@@ -575,12 +605,12 @@ export function WorkflowEditor() {
     setCropModalOpen(true)
   }
 
-  const handleSaveCrop = (crop: { x: number; y: number; width: number; height: number }) => {
+  const handleSaveCrop = (crop: { left: number; top: number; right: number; bottom: number }) => {
     if (cropModuleIndex === null) return
     updateModuleParams(cropModuleIndex, { ...workflow!.modules[cropModuleIndex].params, ...crop })
   }
 
-  const handleTestCrop = async (crop: { x: number; y: number; width: number; height: number; time: number }) => {
+  const handleTestCrop = async (crop: { left: number; top: number; right: number; bottom: number; time: number }) => {
     if (!projectId || !videoId || !currentWorkflowId) throw new Error("Missing context")
     const r = await fetch(`/api/workflows/${currentWorkflowId}/test-crop`, {
       method: "POST",
@@ -603,10 +633,10 @@ export function WorkflowEditor() {
 
   return (
     <div className="flex flex-col h-full min-h-0 bg-panel-2">
-      <div className="px-3 pt-3 pb-2 border-b space-y-2 shrink-0">
-        <div className="flex items-center gap-2 flex-wrap">
+      <div className="px-4 pt-3 pb-3 border-b shrink-0">
+        <div className="flex items-center gap-3 flex-wrap">
           <select
-            className="h-8 rounded-md border border-input bg-background px-2 text-sm min-w-[140px]"
+            className="h-8 rounded-md border border-input bg-background px-3 text-sm min-w-[160px] focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-1"
             value={currentWorkflowId ?? ""}
             onChange={(e) => {
               const v = e.target.value
@@ -621,10 +651,11 @@ export function WorkflowEditor() {
               </option>
             ))}
           </select>
-          <div className="flex items-center gap-1">
+          <div className="h-5 w-px bg-border" aria-hidden />
+          <div className="flex items-center gap-1.5">
             <Input
-              className="h-8 w-32 text-sm"
-              placeholder="New name"
+              className="h-8 w-36 text-sm"
+              placeholder="New workflow name"
               value={newWorkflowName}
               onChange={(e) => setNewWorkflowName(e.target.value)}
             />
@@ -633,49 +664,63 @@ export function WorkflowEditor() {
               New
             </Button>
           </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-8"
-            onClick={() => currentWorkflowId && saveWorkflow(currentWorkflowId)}
-            disabled={!currentWorkflowId || saving}
-          >
-            {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
-          </Button>
-          <Button variant="ghost" size="sm" className="h-8" onClick={exportWorkflow} disabled={!workflow}>
-            <FileDown className="h-3.5 w-3.5" />
-          </Button>
-          <Button variant="ghost" size="sm" className="h-8" onClick={importWorkflow}>
-            <FileUp className="h-3.5 w-3.5" />
-          </Button>
+          <div className="h-5 w-px bg-border" aria-hidden />
+          <label className="flex items-center gap-2 px-2.5 py-1.5 rounded-md hover:bg-muted/60 cursor-pointer select-none transition-colors">
+            <input
+              type="checkbox"
+              checked={autoSave}
+              onChange={(e) => setAutoSave(e.target.checked)}
+              className="h-4 w-4 rounded border-input accent-primary cursor-pointer"
+            />
+            <span className="text-xs font-medium text-foreground">Auto-save</span>
+          </label>
+          <div className="h-5 w-px bg-border" aria-hidden />
+          <div className="flex items-center gap-0.5">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8 px-2"
+              onClick={() => currentWorkflowId && saveWorkflow(currentWorkflowId)}
+              disabled={!currentWorkflowId || saving}
+              title="Save workflow"
+            >
+              {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+            </Button>
+            <Button variant="ghost" size="sm" className="h-8 px-2" onClick={exportWorkflow} disabled={!workflow} title="Export">
+              <FileDown className="h-3.5 w-3.5" />
+            </Button>
+            <Button variant="ghost" size="sm" className="h-8 px-2" onClick={importWorkflow} title="Import">
+              <FileUp className="h-3.5 w-3.5" />
+            </Button>
+          </div>
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-3 space-y-2">
+      <div className="flex-1 overflow-y-auto p-4 space-y-3">
         {workflow && (
           <>
             {showProgress && (activeJobId || jobLogs.length > 0) && (
-              <div className="rounded-lg border bg-muted/30 p-2 space-y-2">
+              <div className="rounded-lg border bg-muted/40 p-3 space-y-2.5 shadow-sm">
                 <div className="flex items-center justify-between text-xs">
                   <span className="font-medium">{jobMessage || "Running..."}</span>
-                  {activeJobId && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                  {activeJobId && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />}
                 </div>
-                <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+                <div className="h-2 bg-muted rounded-full overflow-hidden">
                   <div
-                    className="h-full bg-primary transition-all duration-300"
+                    className="h-full bg-primary transition-all duration-300 rounded-full"
                     style={{ width: `${jobProgress}%` }}
                   />
                 </div>
-                <div className="max-h-24 overflow-y-auto font-mono text-[10px] text-muted-foreground space-y-0.5">
+                <div className="max-h-24 overflow-y-auto font-mono text-[10px] text-muted-foreground space-y-0.5 rounded bg-background/50 px-2 py-1.5">
                   {jobLogs.map((line, i) => (
                     <div key={i}>{line}</div>
                   ))}
                 </div>
               </div>
             )}
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-medium text-muted-foreground">
-                {workflow.name} ({workflow.modules.length} modules)
+            <div className="flex items-center justify-between px-1">
+              <span className="text-sm font-medium text-muted-foreground">
+                {workflow.name} · {workflow.modules.length} {workflow.modules.length === 1 ? "module" : "modules"}
               </span>
               <Button
                 size="sm"
@@ -684,15 +729,15 @@ export function WorkflowEditor() {
                 disabled={runningAll || !!activeJobId || !workflow.modules.length}
               >
                 {runningAll ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin mr-1" />
+                  <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" />
                 ) : (
-                  <Play className="h-3.5 w-3.5 mr-1" />
+                  <Play className="h-3.5 w-3.5 mr-1.5" />
                 )}
                 Run All
               </Button>
             </div>
 
-            <div className="space-y-2">
+            <div className="space-y-2.5">
               {workflow.modules.map((mod, idx) => (
                 <ModuleBlock
                   key={mod.id}
@@ -718,24 +763,24 @@ export function WorkflowEditor() {
               ))}
             </div>
 
-            <div className="relative" ref={addStepPopoverRef}>
+            <div className="relative pt-1" ref={addStepPopoverRef}>
               <Button
                 variant="outline"
                 size="sm"
-                className="h-8 text-xs"
+                className="h-8 text-xs border-dashed"
                 onClick={() => setAddStepPopoverOpen((o) => !o)}
               >
-                <Plus className="h-3.5 w-3.5 mr-1" />
+                <Plus className="h-3.5 w-3.5 mr-1.5" />
                 Add step
               </Button>
               {addStepPopoverOpen && (
-                <div className="absolute left-0 top-full mt-1 z-50 min-w-[200px] rounded-md border bg-background p-1 shadow-md">
+                <div className="absolute left-0 top-full mt-2 z-50 min-w-[220px] rounded-lg border bg-background p-1.5 shadow-lg">
                   <div className="max-h-64 overflow-y-auto space-y-0.5">
                     {moduleTypes.map((m) => (
                       <button
                         key={m.type}
                         type="button"
-                        className="w-full text-left px-2 py-1.5 text-sm rounded hover:bg-accent hover:text-accent-foreground"
+                        className="w-full text-left px-3 py-2 text-sm rounded-md hover:bg-accent hover:text-accent-foreground transition-colors"
                         onClick={() => {
                           addModule(m.type)
                           setAddStepPopoverOpen(false)
@@ -743,7 +788,7 @@ export function WorkflowEditor() {
                       >
                         <span className="font-medium">{m.label}</span>
                         {m.description && (
-                          <span className="block text-xs text-muted-foreground truncate">
+                          <span className="block text-xs text-muted-foreground truncate mt-0.5">
                             {m.description}
                           </span>
                         )}
@@ -756,18 +801,21 @@ export function WorkflowEditor() {
           </>
         )}
       </div>
-      {cropModalOpen && cropModuleIndex !== null && workflow && selectedVideo?.sourceUrl && (
+      {cropModalOpen && cropModuleIndex !== null && workflow && (selectedVideo?.streamUrl ?? selectedVideo?.playUrl) && (
         <CropModal
           isOpen={cropModalOpen}
           onClose={() => setCropModalOpen(false)}
           onSave={handleSaveCrop}
-          videoUrl={selectedVideo.sourceUrl} // Assuming sourceUrl is a valid URL (presigned or public)
-          initialCrop={{
-            x: Number(workflow.modules[cropModuleIndex].params?.x ?? 0),
-            y: Number(workflow.modules[cropModuleIndex].params?.y ?? 0),
-            width: Number(workflow.modules[cropModuleIndex].params?.width ?? 0),
-            height: Number(workflow.modules[cropModuleIndex].params?.height ?? 0),
-          }}
+          videoUrl={selectedVideo!.streamUrl ?? selectedVideo!.playUrl!}
+          initialCrop={(() => {
+            const p = workflow.modules[cropModuleIndex].params ?? {};
+            return {
+              left: Math.min(100, Math.max(0, Number(p.left ?? 0))),
+              top: Math.min(100, Math.max(0, Number(p.top ?? 0))),
+              right: Math.min(100, Math.max(0, Number(p.right ?? 0))),
+              bottom: Math.min(100, Math.max(0, Number(p.bottom ?? 0))),
+            };
+          })()}
           onTestCrop={handleTestCrop}
         />
       )}
@@ -793,6 +841,7 @@ function ModuleBlock({
   onPreview,
   getModuleLabel,
   getAvailableVariables,
+  onOpenCrop,
 }: {
   module: WorkflowModuleDef
   index: number
@@ -811,13 +860,12 @@ function ModuleBlock({
   onPreview: () => void
   getModuleLabel: (type: string) => string
   getAvailableVariables: () => string[]
-  onOpenCrop: () => void
+  onOpenCrop?: () => void
 }) {
   const meta = moduleTypes.find((m) => m.type === module.type)
   const params = module.params ?? {}
-  const quickParams = meta?.quickParams ?? []
   const paramsSchema = meta?.paramsSchema ?? []
-  const paramsToShow = expanded ? paramsSchema : paramsSchema.filter((p) => quickParams.includes(p.key))
+  const paramsToShow = expanded ? paramsSchema : []
 
   const StatusIcon = () => {
     if (status === "running") return <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -829,18 +877,27 @@ function ModuleBlock({
   const renderParam = (p: { key: string; label: string; type: string; default?: unknown; min?: number; max?: number; options?: { value: string; label: string }[] }) => (
     <div key={p.key} className="flex items-center gap-2">
       <label className="text-xs text-muted-foreground w-20 shrink-0">{p.label}</label>
-      {p.type === "number" && (
-        <Input
-          type="number"
-          className="h-7 text-xs"
-          value={Number(params[p.key] ?? p.default ?? 0)}
-          min={p.min}
-          max={p.max}
-          onChange={(e) =>
-            onParamsChange({ ...params, [p.key]: parseFloat(e.target.value) || 0 })
-          }
-        />
-      )}
+      {p.type === "number" && (() => {
+        const raw = Number(params[p.key] ?? p.default ?? 0)
+        const clamped = p.min != null || p.max != null
+          ? Math.max(p.min ?? -Infinity, Math.min(p.max ?? Infinity, raw))
+          : raw
+        return (
+          <Input
+            type="number"
+            className="h-7 text-xs"
+            value={clamped}
+            min={p.min}
+            max={p.max}
+            onChange={(e) => {
+              let v = parseFloat(e.target.value) || 0
+              if (p.min != null) v = Math.max(p.min, v)
+              if (p.max != null) v = Math.min(p.max, v)
+              onParamsChange({ ...params, [p.key]: v })
+            }}
+          />
+        )
+      })()}
       {p.type === "string" && (
         p.options ? (
           <select
@@ -875,10 +932,10 @@ function ModuleBlock({
   )
 
   return (
-    <div className="rounded-lg border bg-panel-3 p-2 text-sm">
-      <div className="flex items-center justify-between gap-2 mb-2">
+    <div className={`rounded-lg border bg-panel-3 text-sm transition-colors ${expanded ? "p-3 shadow-sm" : "px-3 py-2"}`}>
+      <div className={`flex items-center justify-between gap-2 ${expanded ? "mb-3" : ""}`}>
         <div
-          className="flex items-center gap-2 min-w-0 flex-1 cursor-pointer"
+          className="flex items-center gap-2.5 min-w-0 flex-1 cursor-pointer group"
           onClick={onToggleExpand}
           onKeyDown={(e) => e.key === "Enter" && onToggleExpand()}
           role="button"
@@ -886,21 +943,21 @@ function ModuleBlock({
         >
           <button
             type="button"
-            className="shrink-0 p-0.5 -ml-0.5 rounded hover:bg-muted/50"
+            className="shrink-0 p-0.5 -ml-0.5 rounded hover:bg-muted/60 transition-colors"
             onClick={(e) => { e.stopPropagation(); onToggleExpand() }}
             aria-label={expanded ? "Collapse" : "Expand"}
           >
             {expanded ? (
               <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
             ) : (
-              <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
+              <ChevronRight className="h-3.5 w-3.5 text-muted-foreground group-hover:text-foreground transition-colors" />
             )}
           </button>
           <StatusIcon />
           <span className="font-medium truncate">{getModuleLabel(module.type)}</span>
-          <span className="text-xs text-muted-foreground">#{index + 1}</span>
+          <span className="text-xs text-muted-foreground tabular-nums">#{index + 1}</span>
         </div>
-        <div className="flex items-center gap-1 shrink-0">
+        <div className="flex items-center gap-0.5 shrink-0">
           {outputUrl && (
             <Button variant="ghost" size="icon" className="h-6 w-6" onClick={onPreview} title="Preview result">
               <Eye className="h-3 w-3" />
@@ -928,8 +985,8 @@ function ModuleBlock({
         </div>
       </div>
       {expanded && (meta?.inputSlots?.length ?? 0) > 0 && (
-        <div className="space-y-1.5 mb-2">
-          <span className="text-xs font-medium text-muted-foreground">Inputs</span>
+        <div className="space-y-2 mb-3 pt-2 border-t">
+          <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Inputs</span>
           {meta!.inputSlots!.map((slot) => (
             <div key={slot.key} className="flex items-center gap-2">
               <label className="text-xs text-muted-foreground w-20 shrink-0">{slot.label}</label>
@@ -954,8 +1011,8 @@ function ModuleBlock({
         </div>
       )}
       {expanded && (meta?.outputSlots?.length ?? 0) > 0 && (
-        <div className="space-y-1.5 mb-2">
-          <span className="text-xs font-medium text-muted-foreground">Outputs</span>
+        <div className="space-y-2 mb-3 pt-2 border-t">
+          <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Outputs</span>
           {meta!.outputSlots!.map((slot) => (
             <div key={slot.key} className="flex items-center gap-2">
               <label className="text-xs text-muted-foreground w-20 shrink-0">{slot.label}</label>
@@ -973,12 +1030,15 @@ function ModuleBlock({
         </div>
       )}
       {paramsToShow.length > 0 && (
-        <div className="space-y-1.5">
-          {paramsToShow.map((p) => renderParam(p))}
+        <div className="space-y-2 pt-2 border-t">
+          <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Parameters</span>
+          <div className="space-y-2">
+            {paramsToShow.map((p) => renderParam(p))}
+          </div>
         </div>
       )}
       {expanded && module.type === "video.crop" && (
-        <Button variant="outline" size="sm" className="w-full mt-2" onClick={onOpenCrop}>
+        <Button variant="outline" size="sm" className="w-full mt-3" onClick={() => onOpenCrop?.()}>
           <CropIcon className="h-3.5 w-3.5 mr-2" />
           Interactive Crop
         </Button>

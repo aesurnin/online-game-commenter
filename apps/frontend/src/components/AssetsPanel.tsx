@@ -34,7 +34,7 @@ function formatDate(iso?: string): string {
 
 type WorkflowCacheFolder = { folderName: string; moduleId: string }
 
-export function AssetsPanel() {
+export function AssetsPanel({ hideHeader }: { hideHeader?: boolean } = {}) {
   const { selectedVideo, assetsRefreshTrigger, refreshAssets } = useSelectedVideo()
   const { setPreviewVideo } = usePreviewVideo()
   const [assets, setAssets] = useState<Asset[]>([])
@@ -81,11 +81,13 @@ export function AssetsPanel() {
 
   return (
     <div className="flex flex-col h-full min-h-0">
-      <div className="px-3 pt-3 pb-2 border-b shrink-0">
-        <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-          Assets
-        </span>
-      </div>
+      {!hideHeader && (
+        <div className="px-3 pt-3 pb-2 border-b shrink-0">
+          <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+            Assets
+          </span>
+        </div>
+      )}
       <div className="flex-1 overflow-y-auto p-2">
         {loading ? (
           <div className="flex items-center justify-center py-8">

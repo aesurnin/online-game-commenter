@@ -19,7 +19,7 @@ function formatTime(d: Date) {
   })
 }
 
-export function LogsPanel({ embedded }: { embedded?: boolean } = {}) {
+export function LogsPanel({ embedded, hideHeader }: { embedded?: boolean; hideHeader?: boolean } = {}) {
   const { logs, clearLogs } = useLogs()
   const [expanded, setExpanded] = useState(true)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -49,33 +49,35 @@ export function LogsPanel({ embedded }: { embedded?: boolean } = {}) {
 
   return (
     <div className={`flex flex-col flex-1 min-h-0 ${embedded ? "bg-panel-logs" : "w-80 shrink-0 border-l bg-panel-logs min-w-[200px] max-w-[50vw]"}`}>
-      <div className="flex items-center justify-between px-3 pt-3 pb-2 border-b shrink-0">
-        <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-          Logs
-        </span>
-        <div className="flex items-center gap-1">
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7"
-            onClick={clearLogs}
-            title="Clear logs"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </Button>
-          {!embedded && (
+      {!hideHeader && (
+        <div className="flex items-center justify-between px-3 pt-3 pb-2 border-b shrink-0">
+          <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+            Logs
+          </span>
+          <div className="flex items-center gap-1">
             <Button
               variant="ghost"
               size="icon"
               className="h-7 w-7"
-              onClick={() => setExpanded(false)}
-              title="Hide logs"
+              onClick={clearLogs}
+              title="Clear logs"
             >
-              <PanelRightClose className="h-4 w-4" />
+              <Trash2 className="h-3.5 w-3.5" />
             </Button>
-          )}
+            {!embedded && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
+                onClick={() => setExpanded(false)}
+                title="Hide logs"
+              >
+                <PanelRightClose className="h-4 w-4" />
+              </Button>
+            )}
+          </div>
         </div>
-      </div>
+      )}
       <div
         ref={scrollRef}
         className="flex-1 overflow-y-auto overflow-x-hidden font-mono text-xs p-3 min-h-[120px]"

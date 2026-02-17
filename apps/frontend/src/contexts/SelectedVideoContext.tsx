@@ -4,6 +4,10 @@ type SelectedVideo = {
   projectId: string
   videoId: string
   sourceUrl?: string | null
+  /** Presigned URL for playback */
+  playUrl?: string | null
+  /** Streaming URL (Range support, prefer for video src) */
+  streamUrl?: string | null
 } | null
 
 const SelectedVideoContext = createContext<{

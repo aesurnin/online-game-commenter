@@ -60,6 +60,11 @@ server.get('/ping', async (request, reply) => {
   return { pong: 'it works!' };
 });
 
+server.get('/config', async (request, reply) => {
+  const durationLimit = parseInt(process.env.SCREENCAST_MAX_DURATION || '600', 10);
+  return { durationLimit };
+});
+
 async function seedProviderTemplates() {
   const existing = await db.select().from(providerTemplates);
   if (existing.length > 0) return;

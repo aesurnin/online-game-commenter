@@ -210,9 +210,34 @@ function startLivePreview(page: { screenshot: (o: { type: string; quality: numbe
   return () => clearInterval(id);
 }
 
+/** Try to get replay-mode from main frame or any child frame. BGaming uses keys like "replay-mode" + hash. */
+async function getReplayModeFromPage(
+  page: { evaluate: (fn: () => unknown) => Promise<unknown>; frames?: () => { evaluate: (fn: () => unknown) => Promise<unknown> }[] }
+): Promise<string | null> {
+  const frames = page.frames ? page.frames() : [page];
+  for (const frame of frames) {
+    try {
+      const val = await frame.evaluate(() => {
+        try {
+          const ls = (window as any).localStorage;
+          if (!ls) return null;
+          for (let i = 0; i < ls.length; i++) {
+            const k = ls.key(i);
+            if (k && k.startsWith('replay-mode')) return ls.getItem(k);
+          }
+          return null;
+        } catch { return null; }
+      }) as string | null;
+      if (val) return val;
+    } catch { /* cross-origin or frame gone */ }
+  }
+  return null;
+}
+
 async function waitForReplayEnd(
   page: {
     evaluate: (fn: (a: unknown) => unknown, a?: unknown) => Promise<unknown>;
+    frames?: () => { evaluate: (fn: () => unknown) => Promise<unknown> }[];
     on: (event: string, handler: (msg: { text: () => string }) => void) => void;
     off: (event: string, handler: (msg: { text: () => string }) => void) => void;
   },
@@ -227,6 +252,14 @@ async function waitForReplayEnd(
   let lastIdleChange = Date.now();
   const recentConsole: string[] = [];
   const maxConsoleLines = 50;
+  
+  // Detect BGaming replay URLs
+  const isBGamingReplay = jobData.url.includes('bgaming-network.com/api/replays');
+  let lastReplayModeValue: string | null = null;
+  let lastReplayModeChange = Date.now();
+  let freespinsEndedAt: number | null = null;
+  let regularSpinEndedAt: number | null = null;
+  let debugLoggedStructure = false;
 
   const consoleHandler = (msg: { text: () => string }) => {
     try {
@@ -241,22 +274,122 @@ async function waitForReplayEnd(
     return await new Promise((resolve) => {
       const check = async () => {
         const [v] = await db.select().from(videoEntities).where(eq(videoEntities.id, videoId));
-        if (!v || v.status === 'cancelled') { resolve('cancelled'); return; }
+        if (!v || v.status === 'cancelled') { 
+          log('[AutoStop] Reason: Job cancelled in database');
+          resolve('cancelled'); 
+          return; 
+        }
         const meta = v?.metadata as { stopRequested?: boolean } | null;
-        if (meta?.stopRequested) { resolve('stop'); return; }
-        if ((Date.now() - start) / 1000 >= durationLimit) { resolve('done'); return; }
+        if (meta?.stopRequested) { 
+          log('[AutoStop] Reason: Manual stop requested by user');
+          resolve('stop'); 
+          return; 
+        }
+        
+        const elapsed = (Date.now() - start) / 1000;
+        if (elapsed >= durationLimit) { 
+          log(`[AutoStop] Reason: Duration limit reached (${elapsed.toFixed(0)}s >= ${durationLimit}s)`);
+          resolve('done'); 
+          return; 
+        }
+
+        // BGaming replay: check if replay ended via localStorage (try main frame + iframes)
+        if (isBGamingReplay) {
+          try {
+            const currentReplayMode = await getReplayModeFromPage(page as Parameters<typeof getReplayModeFromPage>[0]);
+            
+            if (currentReplayMode !== lastReplayModeValue) {
+              lastReplayModeValue = currentReplayMode;
+              lastReplayModeChange = Date.now();
+            }
+            
+            if (currentReplayMode) {
+              try {
+                const parsed = JSON.parse(currentReplayMode) as Record<string, unknown>;
+                const resultKey = Object.keys(parsed).find(k => k.startsWith('latestSpinResult'));
+                const spinData = resultKey ? (parsed[resultKey] as Record<string, unknown>) : null;
+                const features = spinData?.features as Record<string, unknown> | undefined;
+                const freespinsLeft = features?.freespins_left;
+                
+                if (!debugLoggedStructure && elapsed > 5) {
+                  debugLoggedStructure = true;
+                  const keys = Object.keys(parsed).slice(0, 5);
+                  log(`[BGaming] replay-mode keys: ${keys.join(', ')}, resultKey: ${resultKey || 'none'}`);
+                }
+                
+                if (Math.floor(elapsed) % 10 === 0 && Math.floor(elapsed * 2) % 2 === 0) {
+                  log(`[BGaming] freespins_left: ${freespinsLeft ?? 'n/a'}, idle: ${((Date.now() - lastReplayModeChange) / 1000).toFixed(0)}s`);
+                }
+                
+                // Freespins: freespins_left === 0
+                if (freespinsLeft === 0 && freespinsEndedAt === null) {
+                  freespinsEndedAt = Date.now();
+                  log('[AutoStop] BGaming freespins ended (freespins_left === 0), waiting 60s for animations...');
+                }
+                
+                if (freespinsEndedAt !== null) {
+                  const waitMs = Date.now() - freespinsEndedAt;
+                  if (waitMs >= 60000) {
+                    const reason = `BGaming replay ended (waited 60s after freespins_left === 0)`;
+                    log(`[AutoStop] Reason: ${reason}`);
+                    await db.update(videoEntities)
+                      .set({ metadata: { ...((v?.metadata as any) || {}), stopReason: reason } })
+                      .where(eq(videoEntities.id, videoId));
+                    resolve('done');
+                    return;
+                  }
+                }
+                
+                // Regular spin (no freespins): replay-mode stable for 60s + we have spin result = replay done
+                if (freespinsLeft === undefined && resultKey && spinData) {
+                  const idleSinceChange = (Date.now() - lastReplayModeChange) / 1000;
+                  if (idleSinceChange >= 55 && regularSpinEndedAt === null) {
+                    regularSpinEndedAt = Date.now();
+                    log(`[AutoStop] BGaming regular spin: replay-mode stable ${idleSinceChange.toFixed(0)}s, waiting 10s...`);
+                  }
+                  if (regularSpinEndedAt !== null && Date.now() - regularSpinEndedAt >= 10000) {
+                    const reason = `BGaming replay ended (regular spin, stable ${((Date.now() - lastReplayModeChange) / 1000).toFixed(0)}s)`;
+                    log(`[AutoStop] Reason: ${reason}`);
+                    await db.update(videoEntities)
+                      .set({ metadata: { ...((v?.metadata as any) || {}), stopReason: reason } })
+                      .where(eq(videoEntities.id, videoId));
+                    resolve('done');
+                    return;
+                  }
+                }
+              } catch (e) { 
+                log(`[BGaming] Parse error: ${e}`);
+              }
+            }
+          } catch (e) { 
+            log(`[BGaming] Check error: ${e}`);
+          }
+        }
 
         if (endSelectors?.length) {
           try {
             const found = await page.evaluate((s: string[]) => s.some((sel) => !!document.querySelector(sel)), endSelectors) as boolean;
-            if (found) { log('[AutoStop] endSelector matched'); resolve('done'); return; }
+            if (found) { 
+              const reason = `endSelector matched (${endSelectors.join(', ')})`;
+              log(`[AutoStop] Reason: ${reason}`);
+              await db.update(videoEntities)
+                .set({ metadata: { ...((v?.metadata as any) || {}), stopReason: reason } })
+                .where(eq(videoEntities.id, videoId));
+              resolve('done'); 
+              return; 
+            }
           } catch { /* page gone */ }
         }
 
         if (consoleEndPatterns?.length && recentConsole.length > 0) {
           const last = recentConsole[recentConsole.length - 1];
-          if (consoleEndPatterns.some((p) => last.includes(p))) {
-            log(`[AutoStop] console pattern matched: ${consoleEndPatterns.find((p) => last.includes(p))}`);
+          const matched = consoleEndPatterns.find((p) => last.includes(p));
+          if (matched) {
+            const reason = `Console pattern matched ("${matched}" in "${last}")`;
+            log(`[AutoStop] Reason: ${reason}`);
+            await db.update(videoEntities)
+              .set({ metadata: { ...((v?.metadata as any) || {}), stopReason: reason } })
+              .where(eq(videoEntities.id, videoId));
             resolve('done');
             return;
           }
@@ -275,7 +408,11 @@ async function waitForReplayEnd(
               }
               const idleMs = Date.now() - lastIdleChange;
               if (idleMs >= idleSeconds * 1000) {
-                log(`[AutoStop] idle for ${Math.round(idleMs / 1000)}s (value unchanged)`);
+                const reason = `Idle detection (selector "${idleValueSelector}" unchanged for ${(idleMs / 1000).toFixed(0)}s, value: "${current}")`;
+                log(`[AutoStop] Reason: ${reason}`);
+                await db.update(videoEntities)
+                  .set({ metadata: { ...((v?.metadata as any) || {}), stopReason: reason } })
+                  .where(eq(videoEntities.id, videoId));
                 resolve('idle');
                 return;
               }

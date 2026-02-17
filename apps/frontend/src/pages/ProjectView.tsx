@@ -10,7 +10,7 @@ type VideoEntity = {
   status: string
   sourceUrl?: string
   playUrl?: string
-  metadata?: { error?: string }
+  metadata?: { error?: string; stopReason?: string }
   createdAt?: string
 }
 
@@ -38,6 +38,7 @@ export function ProjectView() {
   const [cancelling, setCancelling] = useState(false)
   const [stopping, setStopping] = useState(false)
   const [restarting, setRestarting] = useState(false)
+  const [durationLimit, setDurationLimit] = useState<number | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const navigate = useNavigate()
   const { addLog } = useLogs()
@@ -89,6 +90,13 @@ export function ProjectView() {
   }, [id, navigate, addLog])
 
   const hasProcessing = videos.some((v) => v.status === "processing")
+  useEffect(() => {
+    if (!hasProcessing) return
+    fetch("/api/config", { credentials: "include" })
+      .then((r) => r.ok ? r.json() : {})
+      .then((c) => setDurationLimit(c.durationLimit ?? null))
+      .catch(() => {})
+  }, [hasProcessing])
   useEffect(() => {
     if (!id || !hasProcessing) return
     const interval = setInterval(refreshVideosAndSelection, 1500)
@@ -606,6 +614,7 @@ export function ProjectView() {
                     {selectedVideo.createdAt && (
                       <span className="text-xs text-white/80">
                         {Math.floor((Date.now() - new Date(selectedVideo.createdAt).getTime()) / 1000)}s
+                        {durationLimit != null && ` / ${durationLimit}s max`}
                       </span>
                     )}
                   </div>
@@ -635,6 +644,16 @@ export function ProjectView() {
               </div>
               <p className="text-sm text-muted-foreground text-center">
                 Live preview of what is being recorded. Video + audio will be saved when the replay ends or after Stop.
+                {durationLimit != null && (
+                  <span className="block mt-1 text-xs">
+                    Max duration: {Math.floor(durationLimit / 60)} min
+                  </span>
+                )}
+                {selectedVideo.metadata?.stopReason && (
+                  <span className="block mt-1 text-xs">
+                    Stop reason: {selectedVideo.metadata.stopReason}
+                  </span>
+                )}
               </p>
             </div>
           ) : selectedVideo?.status === "cancelled" ? (
@@ -664,12 +683,19 @@ export function ProjectView() {
               </Button>
             </div>
           ) : (selectedVideo?.playUrl ?? selectedVideo?.sourceUrl) ? (
-            <div className="w-full max-w-4xl aspect-video bg-black rounded-lg overflow-hidden shadow-lg">
-              <video
-                src={selectedVideo!.playUrl ?? selectedVideo!.sourceUrl}
-                controls
-                className="w-full h-full object-contain"
-              />
+            <div className="w-full max-w-4xl space-y-2">
+              <div className="aspect-video bg-black rounded-lg overflow-hidden shadow-lg">
+                <video
+                  src={selectedVideo!.playUrl ?? selectedVideo!.sourceUrl}
+                  controls
+                  className="w-full h-full object-contain"
+                />
+              </div>
+              {selectedVideo.metadata?.stopReason && (
+                <p className="text-xs text-center text-muted-foreground">
+                  Stopped: {selectedVideo.metadata.stopReason}
+                </p>
+              )}
             </div>
           ) : selectedVideo ? (
             <div className="text-center text-muted-foreground">

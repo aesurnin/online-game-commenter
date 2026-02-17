@@ -14,6 +14,7 @@ const queueRoutes: FastifyPluginAsync = async (fastify) => {
       screencastQueue.getFailed(),
       screencastQueue.getDelayed(),
     ]);
+    const durationLimit = parseInt(process.env.SCREENCAST_MAX_DURATION || '600', 10);
     return reply.send({
       counts: {
         waiting: waiting.length,
@@ -22,6 +23,7 @@ const queueRoutes: FastifyPluginAsync = async (fastify) => {
         failed: failed.length,
         delayed: delayed.length,
       },
+      durationLimit,
       waiting: waiting.map((j) => ({ id: j.id, videoId: j.data?.videoId, url: j.data?.url })),
       active: active.map((j) => ({ id: j.id, videoId: j.data?.videoId, url: j.data?.url })),
       failed: failed.map((j) => ({ id: j.id, videoId: j.data?.videoId, failedReason: j.failedReason })),

@@ -30,6 +30,12 @@ export type ScreencastJobData = {
   durationLimit?: number;
   endSelectors?: string[];
   playSelectors?: string[];
+  /** Provider-specific: selector for element whose value we monitor (e.g. Total Win). If unchanged for idleSeconds, stop. */
+  idleValueSelector?: string;
+  /** Seconds of no change in idleValueSelector before auto-stop. Default 40. */
+  idleSeconds?: number;
+  /** Console log patterns that indicate replay ended (e.g. "track Spin Started" at end). */
+  consoleEndPatterns?: string[];
 };
 
 export async function addScreencastJob(data: ScreencastJobData) {

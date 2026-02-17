@@ -107,6 +107,9 @@ export function Dashboard() {
             <Button variant="ghost" size="sm" onClick={() => navigate("/queue")}>
               Queue
             </Button>
+            <Button variant="ghost" size="sm" onClick={() => navigate("/providers")}>
+              Providers
+            </Button>
             <span className="text-sm text-muted-foreground">
               {user.username || "User"}
             </span>

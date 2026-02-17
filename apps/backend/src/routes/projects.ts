@@ -1,12 +1,23 @@
 import { FastifyPluginAsync } from 'fastify';
 import path from 'path';
 import { db } from '../db/index.js';
-import { projects, videoEntities } from '../db/schema/index.js';
+import { projects, providerTemplates, videoEntities } from '../db/schema/index.js';
 import { and, eq } from 'drizzle-orm';
 import z from 'zod';
 import { uploadToR2, deleteFromR2, getPresignedUrl } from '../lib/r2.js';
 import { addScreencastJob, removeScreencastJobByVideoId } from '../lib/queue.js';
 import { getFrame, clearFrame } from '../lib/live-preview-store.js';
+
+async function resolveProviderForUrl(url: string) {
+  let host: string;
+  try {
+    host = new URL(url.startsWith('http') ? url : `https://${url}`).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+  const templates = await db.select().from(providerTemplates);
+  return templates.find((t) => host.includes(t.urlPattern.toLowerCase())) ?? null;
+}
 
 const projectsRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.addHook('preHandler', async (request, reply) => {
@@ -123,22 +134,53 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
     }).returning();
 
     const durationLimit = parseInt(process.env.SCREENCAST_MAX_DURATION || '600', 10);
+    const provider = await resolveProviderForUrl(body.data.url);
+
     let endSelectors: string[] | undefined;
     let playSelectors: string[] | undefined;
-    try {
-      const s = process.env.SCREENCAST_END_SELECTORS;
-      if (s) endSelectors = JSON.parse(s) as string[];
-    } catch {
-      // ignore invalid JSON
+    let idleValueSelector: string | undefined;
+    let idleSeconds: number | undefined;
+    let consoleEndPatterns: string[] | undefined;
+
+    if (provider) {
+      playSelectors = (provider.playSelectors as string[])?.length ? (provider.playSelectors as string[]) : undefined;
+      endSelectors = (provider.endSelectors as string[])?.length ? (provider.endSelectors as string[]) : undefined;
+      idleValueSelector = provider.idleValueSelector ?? undefined;
+      idleSeconds = provider.idleSeconds ?? 40;
+      consoleEndPatterns = (provider.consoleEndPatterns as string[])?.length ? (provider.consoleEndPatterns as string[]) : undefined;
     }
-    try {
-      const s = process.env.SCREENCAST_PLAY_SELECTORS;
-      if (s) playSelectors = JSON.parse(s) as string[];
-    } catch {
-      // ignore invalid JSON
+
+    if (!playSelectors?.length) {
+      try {
+        const s = process.env.SCREENCAST_PLAY_SELECTORS;
+        if (s) playSelectors = JSON.parse(s) as string[];
+      } catch { /* ignore */ }
     }
-    if (!playSelectors?.length && body.data.url.includes('bgaming-network.com')) {
-      playSelectors = ['#playBtn', 'button#playBtn', '[class*="replay"]'];
+    if (!endSelectors?.length) {
+      try {
+        const s = process.env.SCREENCAST_END_SELECTORS;
+        if (s) endSelectors = JSON.parse(s) as string[];
+      } catch { /* ignore */ }
+    }
+    if (!idleValueSelector) {
+      const s = process.env.SCREENCAST_IDLE_SELECTOR;
+      if (s) idleValueSelector = s;
+    }
+    if (idleSeconds == null) {
+      const s = process.env.SCREENCAST_IDLE_SECONDS;
+      if (s) idleSeconds = parseInt(s, 10);
+    }
+    if (!consoleEndPatterns?.length) {
+      try {
+        const s = process.env.SCREENCAST_CONSOLE_END_PATTERNS;
+        if (s) consoleEndPatterns = JSON.parse(s) as string[];
+      } catch { /* ignore */ }
+    }
+
+    if (body.data.url.includes('bgaming-network.com') && !provider) {
+      if (!playSelectors?.length) playSelectors = ['#playBtn', 'button#playBtn', '[class*="replay"]'];
+      if (!idleValueSelector) idleValueSelector = '[class*="total-win"], [class*="totalWin"], [class*="win-total"], [class*="winTotal"], [class*="total_win"]';
+      if (idleSeconds == null) idleSeconds = 40;
     }
 
     await addScreencastJob({
@@ -148,6 +190,9 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
       durationLimit,
       endSelectors,
       playSelectors,
+      idleValueSelector,
+      idleSeconds,
+      consoleEndPatterns,
     });
 
     return reply.status(201).send(video);
@@ -214,22 +259,51 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     const durationLimit = parseInt(process.env.SCREENCAST_MAX_DURATION || '600', 10);
+    const provider = await resolveProviderForUrl(url);
+
     let endSelectors: string[] | undefined;
     let playSelectors: string[] | undefined;
-    try {
-      const s = process.env.SCREENCAST_END_SELECTORS;
-      if (s) endSelectors = JSON.parse(s) as string[];
-    } catch {
-      // ignore
+    let idleValueSelector: string | undefined;
+    let idleSeconds: number | undefined;
+    let consoleEndPatterns: string[] | undefined;
+
+    if (provider) {
+      playSelectors = (provider.playSelectors as string[])?.length ? (provider.playSelectors as string[]) : undefined;
+      endSelectors = (provider.endSelectors as string[])?.length ? (provider.endSelectors as string[]) : undefined;
+      idleValueSelector = provider.idleValueSelector ?? undefined;
+      idleSeconds = provider.idleSeconds ?? 40;
+      consoleEndPatterns = (provider.consoleEndPatterns as string[])?.length ? (provider.consoleEndPatterns as string[]) : undefined;
     }
-    try {
-      const s = process.env.SCREENCAST_PLAY_SELECTORS;
-      if (s) playSelectors = JSON.parse(s) as string[];
-    } catch {
-      // ignore
+    if (!playSelectors?.length) {
+      try {
+        const s = process.env.SCREENCAST_PLAY_SELECTORS;
+        if (s) playSelectors = JSON.parse(s) as string[];
+      } catch { /* ignore */ }
     }
-    if (!playSelectors?.length && url.includes('bgaming-network.com')) {
-      playSelectors = ['#playBtn', 'button#playBtn', '[class*="replay"]'];
+    if (!endSelectors?.length) {
+      try {
+        const s = process.env.SCREENCAST_END_SELECTORS;
+        if (s) endSelectors = JSON.parse(s) as string[];
+      } catch { /* ignore */ }
+    }
+    if (!idleValueSelector) {
+      const s = process.env.SCREENCAST_IDLE_SELECTOR;
+      if (s) idleValueSelector = s;
+    }
+    if (idleSeconds == null) {
+      const s = process.env.SCREENCAST_IDLE_SECONDS;
+      if (s) idleSeconds = parseInt(s, 10);
+    }
+    if (!consoleEndPatterns?.length) {
+      try {
+        const s = process.env.SCREENCAST_CONSOLE_END_PATTERNS;
+        if (s) consoleEndPatterns = JSON.parse(s) as string[];
+      } catch { /* ignore */ }
+    }
+    if (url.includes('bgaming-network.com') && !provider) {
+      if (!playSelectors?.length) playSelectors = ['#playBtn', 'button#playBtn', '[class*="replay"]'];
+      if (!idleValueSelector) idleValueSelector = '[class*="total-win"], [class*="totalWin"], [class*="win-total"], [class*="winTotal"], [class*="total_win"]';
+      if (idleSeconds == null) idleSeconds = 40;
     }
 
     await db.update(videoEntities)
@@ -243,6 +317,9 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
       durationLimit,
       endSelectors,
       playSelectors,
+      idleValueSelector,
+      idleSeconds,
+      consoleEndPatterns,
     });
 
     return reply.send({ success: true });

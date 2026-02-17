@@ -5,6 +5,7 @@ import { Register } from "@/pages/Register"
 import { Dashboard } from "@/pages/Dashboard"
 import { ProjectView } from "@/pages/ProjectView"
 import { QueueMonitor } from "@/pages/QueueMonitor"
+import { Providers } from "@/pages/Providers"
 import { LogsProvider, useLogs } from "@/contexts/LogsContext"
 import { LogsPanel } from "@/components/LogsPanel"
 
@@ -27,6 +28,7 @@ function AppLayout() {
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/projects/:id" element={<ProjectView />} />
           <Route path="/queue" element={<QueueMonitor />} />
+          <Route path="/providers" element={<Providers />} />
           <Route path="/" element={<Navigate to="/dashboard" replace />} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>

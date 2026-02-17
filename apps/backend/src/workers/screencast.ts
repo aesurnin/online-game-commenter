@@ -211,33 +211,96 @@ function startLivePreview(page: { screenshot: (o: { type: string; quality: numbe
 }
 
 async function waitForReplayEnd(
-  page: { evaluate: (fn: (s: string[]) => boolean, s: string[]) => Promise<boolean> },
-  videoId: string, endSelectors: string[] | undefined, durationLimitSeconds: number
-): Promise<'cancelled' | 'stop' | 'done'> {
+  page: {
+    evaluate: (fn: (a: unknown) => unknown, a?: unknown) => Promise<unknown>;
+    on: (event: string, handler: (msg: { text: () => string }) => void) => void;
+    off: (event: string, handler: (msg: { text: () => string }) => void) => void;
+  },
+  videoId: string,
+  jobData: { url: string; endSelectors?: string[]; durationLimit?: number; idleValueSelector?: string; idleSeconds?: number; consoleEndPatterns?: string[] },
+  log: (m: string) => void
+): Promise<'cancelled' | 'stop' | 'done' | 'idle'> {
+  const { endSelectors, durationLimit = 600, idleValueSelector, idleSeconds = 40, consoleEndPatterns } = jobData;
   const start = Date.now();
-  const poll = 300;
-  return new Promise((resolve) => {
-    const check = async () => {
-      const [v] = await db.select().from(videoEntities).where(eq(videoEntities.id, videoId));
-      if (!v || v.status === 'cancelled') { resolve('cancelled'); return; }
-      const meta = v?.metadata as { stopRequested?: boolean } | null;
-      if (meta?.stopRequested) { resolve('stop'); return; }
-      if ((Date.now() - start) / 1000 >= durationLimitSeconds) { resolve('done'); return; }
-      if (endSelectors?.length) {
-        try {
-          const found = await page.evaluate((s: string[]) => s.some((sel) => !!document.querySelector(sel)), endSelectors);
-          if (found) { resolve('done'); return; }
-        } catch { /* page gone */ }
-      }
-      setTimeout(check, poll);
-    };
-    check();
-  });
+  const poll = 500;
+  let lastIdleValue: string | null = null;
+  let lastIdleChange = Date.now();
+  const recentConsole: string[] = [];
+  const maxConsoleLines = 50;
+
+  const consoleHandler = (msg: { text: () => string }) => {
+    try {
+      const text = msg.text();
+      recentConsole.push(text);
+      if (recentConsole.length > maxConsoleLines) recentConsole.shift();
+    } catch { /* ignore */ }
+  };
+  page.on('console', consoleHandler);
+
+  try {
+    return await new Promise((resolve) => {
+      const check = async () => {
+        const [v] = await db.select().from(videoEntities).where(eq(videoEntities.id, videoId));
+        if (!v || v.status === 'cancelled') { resolve('cancelled'); return; }
+        const meta = v?.metadata as { stopRequested?: boolean } | null;
+        if (meta?.stopRequested) { resolve('stop'); return; }
+        if ((Date.now() - start) / 1000 >= durationLimit) { resolve('done'); return; }
+
+        if (endSelectors?.length) {
+          try {
+            const found = await page.evaluate((s: string[]) => s.some((sel) => !!document.querySelector(sel)), endSelectors) as boolean;
+            if (found) { log('[AutoStop] endSelector matched'); resolve('done'); return; }
+          } catch { /* page gone */ }
+        }
+
+        if (consoleEndPatterns?.length && recentConsole.length > 0) {
+          const last = recentConsole[recentConsole.length - 1];
+          if (consoleEndPatterns.some((p) => last.includes(p))) {
+            log(`[AutoStop] console pattern matched: ${consoleEndPatterns.find((p) => last.includes(p))}`);
+            resolve('done');
+            return;
+          }
+        }
+
+        if (idleValueSelector) {
+          try {
+            const current = await page.evaluate((sel: string) => {
+              const el = document.querySelector(sel);
+              return el ? (el.textContent || '').trim() : null;
+            }, idleValueSelector) as string | null;
+            if (current != null) {
+              if (lastIdleValue !== current) {
+                lastIdleValue = current;
+                lastIdleChange = Date.now();
+              }
+              const idleMs = Date.now() - lastIdleChange;
+              if (idleMs >= idleSeconds * 1000) {
+                log(`[AutoStop] idle for ${Math.round(idleMs / 1000)}s (value unchanged)`);
+                resolve('idle');
+                return;
+              }
+            }
+          } catch { /* selector invalid or page gone */ }
+        }
+
+        setTimeout(check, poll);
+      };
+      check();
+    });
+  } finally {
+    page.off('console', consoleHandler);
+  }
 }
 
 async function convertWebmToMp4(webmPath: string, mp4Path: string): Promise<boolean> {
   return new Promise((resolve) => {
-    const proc = spawn('ffmpeg', ['-y', '-i', webmPath, '-c', 'copy', mp4Path], { stdio: ['ignore', 'pipe', 'pipe'] });
+    // WebM uses VP8/Opus; MP4 needs H.264/AAC. Re-encode instead of copy.
+    const proc = spawn('ffmpeg', [
+      '-y', '-i', webmPath,
+      '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+      '-c:a', 'aac', '-b:a', '128k',
+      mp4Path,
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
     proc.on('error', () => resolve(false));
     proc.on('close', (code) => resolve(code === 0));
     setTimeout(() => { proc.kill('SIGKILL'); resolve(false); }, 120_000);
@@ -265,50 +328,54 @@ async function runScreencastJob(jobData: ScreencastJobData): Promise<void> {
     const vw = 1920;
     const vh = 1080;
     
-    log(`Launch config: headless=${useHeadless}, BACKEND_URL=${BACKEND_URL}, res=${vw}x${vh}@2x`);
+    log(`Launch config: headless=new, BACKEND_URL=${BACKEND_URL}, res=${vw}x${vh}@2x`);
 
     browser = await launch({
-      headless: useHeadless,
+      headless: 'new',
       executablePath,
-      ignoreDefaultArgs: ['--enable-automation'],
+      ignoreDefaultArgs: ['--enable-automation', '--mute-audio'],
       defaultViewport: { width: vw, height: vh, deviceScaleFactor: 2 },
-      startDelay: 1000,
+      startDelay: 2000,
       args: [
-        '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--autoplay-policy=no-user-gesture-required',
+        '--no-sandbox', 
+        '--disable-setuid-sandbox', 
+        '--disable-dev-shm-usage', 
+        '--autoplay-policy=no-user-gesture-required',
         '--allowlisted-extension-id=jjndjgheafjngoipoacpjgeicjeomjli',
         `--window-size=${vw},${vh}`,
         '--force-device-scale-factor=2',
         '--hide-scrollbars',
-        '--mute-audio',
         '--no-first-run',
         '--no-default-browser-check',
         '--disable-notifications',
         '--disable-features=IsolateOrigins,site-per-process',
         '--auto-accept-this-tab-capture',
-        '--kiosk', // Ultimate "no-UI" mode
-        ...(useHeadless
-          ? ['--headless', '--enable-audio-service', '--mute-audio=false']
-          : [
-              `--window-position=${WINDOW_POSITION}`,
-              '--disable-background-timer-throttling',
-              '--disable-backgrounding-occluded-windows',
-              '--disable-renderer-backgrounding',
-            ]),
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+        '--headless=new',
+        '--enable-audio-service-audio-streams',
       ],
     });
+    log('Browser launched');
     if (await isJobCancelled(videoId)) throw new JobCancelledError();
     const page = await browser.newPage();
+    log('New page created');
     // We already set defaultViewport in launch, no need to call it twice and cause jumps
     
     if (await isJobCancelled(videoId)) throw new JobCancelledError();
+    log('Going to URL...');
     await page.goto(finalUrl, { waitUntil: 'networkidle2', timeout: 45000 });
+    log('Page loaded');
     await page.bringToFront();
     
     if (await isJobCancelled(videoId)) throw new JobCancelledError();
+    log('Injecting CSS...');
     await injectFitCSS(page);
     
     // Crucial: Wait 5 seconds for the layout and capture extension to stabilize
     await new Promise((r) => setTimeout(r, 5000));
+    log('Starting capture...');
     
     stopPreview = startLivePreview(page, videoId, log);
     if (await isJobCancelled(videoId)) throw new JobCancelledError();
@@ -317,32 +384,65 @@ async function runScreencastJob(jobData: ScreencastJobData): Promise<void> {
       audio: true, 
       video: true, 
       videoBitsPerSecond: 8_000_000, 
-      audioBitsPerSecond: 128_000,
-      // Remove videoConstraints to let the browser use native tab resolution.
-      // Forcing resolution here with DPR=2 often causes cropping/offset issues.
+      audioBitsPerSecond: 128_000
     });
-    const file = createWriteStream(webmPath);
-    stream.pipe(file);
+    log('Stream captured');
+
+    // Stream directly to FFmpeg for real-time MP4 encoding (as in the old pipeline)
+    const ffmpegProcess = spawn('ffmpeg', [
+      '-y',
+      '-i', '-', // Read from stdin
+      '-c:v', 'libx264', 
+      '-preset', 'ultrafast', // Faster encoding to keep up with the stream
+      '-crf', '18',          // Better quality (lower is better)
+      '-c:a', 'aac', 
+      '-b:a', '192k',
+      '-pix_fmt', 'yuv420p',  // Standard pixel format for compatibility
+      '-movflags', 'frag_keyframe+empty_moov',
+      mp4Path,
+    ], { stdio: ['pipe', 'pipe', 'pipe'] });
+
+    // Log FFmpeg output to diagnose audio issues
+    ffmpegProcess.stderr.on('data', (data) => {
+      const msg = data.toString();
+      if (msg.includes('Audio:') || msg.includes('Stream #') || msg.includes('error')) {
+        log(`[FFmpeg] ${msg.trim()}`);
+      }
+    });
+
+    stream.pipe(ffmpegProcess.stdin);
     
     await clickPlayButton(page, videoId, playSelectors, vw, vh, log);
     await new Promise((r) => setTimeout(r, 1000));
     log('Recording...');
-    const result = await waitForReplayEnd(page, videoId, endSelectors, durationLimit);
+    const result = await waitForReplayEnd(page, videoId, jobData, log);
     log(`Stopped: ${result}`);
+    
     stream.destroy();
-    await new Promise<void>((res) => { file.on('finish', () => res()); file.on('error', () => res()); setTimeout(() => res(), 3000); });
-    file.close();
+    ffmpegProcess.stdin.end();
+
+    // Wait for FFmpeg to finish encoding
+    await new Promise((resolve) => {
+      ffmpegProcess.on('close', resolve);
+      setTimeout(resolve, 5000); // safety timeout
+    });
+
     if (browser) { await browser.close(); browser = null; }
     if (result === 'cancelled') return;
     await new Promise((r) => setTimeout(r, 1000));
-    let finalPath = webmPath;
-    let contentType = 'video/webm';
-    if (await convertWebmToMp4(webmPath, mp4Path)) {
-      try {
-        const stat = await fs.stat(mp4Path);
-        if (stat.size >= 1000) { finalPath = mp4Path; contentType = 'video/mp4'; }
-      } catch { /* keep webm */ }
+    
+    let finalPath = mp4Path;
+    let contentType = 'video/mp4';
+
+    // Verify MP4 was created and has size
+    try {
+      const stat = await fs.stat(mp4Path);
+      if (stat.size < 1000) throw new Error('MP4 too small');
+    } catch {
+      log('MP4 encoding failed or too small, no output');
+      return;
     }
+
     const buffer = await fs.readFile(finalPath);
     if (!BACKEND_URL || !PREVIEW_SECRET) throw new Error('BACKEND_URL and SCREENCAST_PREVIEW_SECRET required');
     const res = await fetch(`${BACKEND_URL.replace(/\/$/, '')}/internal/upload-video/${videoId}`, {
@@ -373,4 +473,36 @@ worker.on('active', (j) => console.log('[Worker] Active', j.id));
 worker.on('completed', (j) => console.log('[Worker] Completed', j.id));
 worker.on('failed', (j, e) => console.error('[Worker] Failed', j?.id, e));
 worker.on('error', (e) => console.error('[Worker] Error', e));
+
+// Clean up stale jobs on startup (jobs that were active when worker crashed)
+(async () => {
+  try {
+    const activeJobs = await worker.getActive();
+    console.log(`[Worker] Cleaning ${activeJobs.length} stale jobs from previous run...`);
+    for (const job of activeJobs) {
+      if (job.data?.videoId) {
+        await db.update(videoEntities)
+          .set({ status: 'failed', metadata: { error: 'Worker restarted' } })
+          .where(eq(videoEntities.id, job.data.videoId));
+      }
+      await job.moveToFailed(new Error('Worker restarted'), job.token || '');
+    }
+  } catch (err) {
+    console.error('[Worker] Failed to clean stale jobs:', err);
+  }
+})();
+
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  console.log('[Worker] SIGTERM received, closing...');
+  await worker.close();
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  console.log('[Worker] SIGINT received, closing...');
+  await worker.close();
+  process.exit(0);
+});
+
 console.log('Screencast worker started. REDIS=%s:%d', redisOpts.host, redisOpts.port);

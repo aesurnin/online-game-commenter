@@ -24,6 +24,15 @@ export function ProjectView() {
   const [uploadProgress, setUploadProgress] = useState<number | null>(null)
   const [urlInput, setUrlInput] = useState("")
   const [urlLoading, setUrlLoading] = useState(false)
+  const [providerMeta, setProviderMeta] = useState<{
+    name: string
+    playSelectors: string[]
+    endSelectors: string[]
+    idleValueSelector?: string
+    idleSeconds: number
+    consoleEndPatterns: string[]
+  } | null>(null)
+  const [providerDetecting, setProviderDetecting] = useState(false)
   const [recordingTick, setRecordingTick] = useState(0)
   const [livePreviewUrl, setLivePreviewUrl] = useState<string | null>(null)
   const [cancelling, setCancelling] = useState(false)
@@ -91,6 +100,41 @@ export function ProjectView() {
     const interval = setInterval(() => setRecordingTick((t) => t + 1), 1000)
     return () => clearInterval(interval)
   }, [selectedVideo?.id, selectedVideo?.status])
+
+  // Detect provider when URL changes (debounced)
+  useEffect(() => {
+    const u = urlInput.trim()
+    if (!u || u.length < 10) {
+      setProviderMeta(null)
+      return
+    }
+    const t = setTimeout(async () => {
+      setProviderDetecting(true)
+      try {
+        const r = await fetch(`/api/providers/detect?url=${encodeURIComponent(u)}`, {
+          credentials: "include",
+        })
+        const data = await r.json()
+        if (data.provider) {
+          setProviderMeta({
+            name: data.provider.name,
+            playSelectors: data.provider.playSelectors || [],
+            endSelectors: data.provider.endSelectors || [],
+            idleValueSelector: data.provider.idleValueSelector,
+            idleSeconds: data.provider.idleSeconds ?? 40,
+            consoleEndPatterns: data.provider.consoleEndPatterns || [],
+          })
+        } else {
+          setProviderMeta(null)
+        }
+      } catch {
+        setProviderMeta(null)
+      } finally {
+        setProviderDetecting(false)
+      }
+    }, 400)
+    return () => clearTimeout(t)
+  }, [urlInput])
 
   // Poll live preview (what the worker is actually recording)
   useEffect(() => {
@@ -208,6 +252,7 @@ export function ProjectView() {
         setSelectedVideo(v)
         setShowAddForm(false)
         setUrlInput("")
+        setProviderMeta(null)
         addLog(`Video added by URL: ${v.id.slice(0, 8)}...`)
       } else {
         const err = await r.json().catch(() => ({}))
@@ -246,6 +291,28 @@ export function ProjectView() {
       addLog(`Stop failed: ${msg}. Is backend running on port 3000?`, "error")
     } finally {
       setStopping(false)
+    }
+  }
+
+  async function handleCancelRecording(e: React.MouseEvent, video: VideoEntity) {
+    e.stopPropagation()
+    if (!id) return
+    addLog(`Cancelling recording ${video.id.slice(0, 8)}...`)
+    try {
+      const r = await fetch(`/api/projects/${id}/videos/${video.id}/cancel`, {
+        method: "POST",
+        credentials: "include",
+      })
+      if (r.ok) {
+        addLog(`Recording cancelled`)
+        refreshVideosAndSelection()
+      } else {
+        const err = await r.json().catch(() => ({}))
+        addLog(`Cancel failed: ${err.error || r.status}`, "error")
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "network error"
+      addLog(`Cancel failed: ${msg}`, "error")
     }
   }
 
@@ -350,6 +417,9 @@ export function ProjectView() {
             </Button>
             <Button variant="ghost" size="sm" onClick={() => navigate("/queue")}>
               Queue
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => navigate("/providers")}>
+              Providers
             </Button>
             <h1 className="font-semibold">{project.name}</h1>
           </div>
@@ -496,6 +566,21 @@ export function ProjectView() {
                   )}
                 </Button>
               </form>
+              {providerDetecting && (
+                <p className="text-xs text-muted-foreground text-center">Detecting provider...</p>
+              )}
+              {providerMeta && !providerDetecting && (
+                <div className="rounded-lg border bg-card p-3 text-sm space-y-2">
+                  <p className="font-medium text-primary">{providerMeta.name}</p>
+                  <div className="space-y-1 text-muted-foreground">
+                    <p><span className="text-foreground">Start:</span> {providerMeta.playSelectors.length ? providerMeta.playSelectors.join(", ") : "—"}</p>
+                    <p><span className="text-foreground">End:</span> {providerMeta.idleValueSelector ? `Idle ${providerMeta.idleSeconds}s on "${providerMeta.idleValueSelector}"` : providerMeta.endSelectors.length ? providerMeta.endSelectors.join(", ") : "—"}</p>
+                    {providerMeta.consoleEndPatterns.length > 0 && (
+                      <p><span className="text-foreground">Console:</span> {providerMeta.consoleEndPatterns.join(", ")}</p>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           ) : selectedVideo?.status === "processing" ? (
             <div className="w-full max-w-4xl flex flex-col gap-2">

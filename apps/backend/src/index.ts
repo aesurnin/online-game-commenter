@@ -1,4 +1,6 @@
 import './load-env.js';
+import { db } from './db/index.js';
+import { providerTemplates } from './db/schema/index.js';
 import Fastify, { FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
@@ -45,10 +47,12 @@ server.addHook('preHandler', async (request, reply) => {
 // Routes
 import authRoutes from './routes/auth.js';
 import projectsRoutes from './routes/projects.js';
+import providersRoutes from './routes/providers.js';
 import queueRoutes from './routes/queue.js';
 import { internalRoutes } from './routes/internal.js';
 server.register(authRoutes, { prefix: '/auth' });
 server.register(projectsRoutes, { prefix: '/projects' });
+server.register(providersRoutes, { prefix: '/providers' });
 server.register(queueRoutes, { prefix: '/queue' });
 server.register(internalRoutes, { prefix: '/internal' });
 
@@ -56,8 +60,24 @@ server.get('/ping', async (request, reply) => {
   return { pong: 'it works!' };
 });
 
+async function seedProviderTemplates() {
+  const existing = await db.select().from(providerTemplates);
+  if (existing.length > 0) return;
+  await db.insert(providerTemplates).values({
+    name: 'BGaming',
+    urlPattern: 'bgaming-network.com',
+    playSelectors: ['#playBtn', 'button#playBtn', '[class*="replay"]'],
+    endSelectors: [],
+    idleValueSelector: '[class*="total-win"], [class*="totalWin"], [class*="win-total"], [class*="winTotal"], [class*="total_win"]',
+    idleSeconds: 40,
+    consoleEndPatterns: [],
+  });
+  console.log('[Seed] Added BGaming provider template');
+}
+
 const start = async () => {
   try {
+    await seedProviderTemplates();
     await server.listen({ port: 3000, host: '0.0.0.0' });
     console.log(`Server listening on ${server.server.address()}`);
   } catch (err) {

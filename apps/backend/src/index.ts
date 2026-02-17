@@ -52,13 +52,16 @@ import providersRoutes from './routes/providers.js';
 import queueRoutes from './routes/queue.js';
 import workflowsRoutes from './routes/workflows.js';
 import { internalRoutes } from './routes/internal.js';
+import envRoutes from './routes/env.js';
 import { startWorkflowWorker } from './workers/workflow.js';
+import { loadAppEnvIntoProcess } from './lib/env-store.js';
 server.register(authRoutes, { prefix: '/auth' });
 server.register(projectsRoutes, { prefix: '/projects' });
 server.register(providersRoutes, { prefix: '/providers' });
 server.register(queueRoutes, { prefix: '/queue' });
 server.register(workflowsRoutes, { prefix: '/workflows' });
 server.register(internalRoutes, { prefix: '/internal' });
+server.register(envRoutes, { prefix: '/env' });
 
 server.get('/ping', async (request, reply) => {
   return { pong: 'it works!' };
@@ -88,6 +91,7 @@ const start = async () => {
   try {
     await seedAuthUsers();
     await seedProviderTemplates();
+    await loadAppEnvIntoProcess();
     await server.listen({ port: 3000, host: '0.0.0.0' });
     console.log(`Server listening on ${server.server.address()}`);
     startWorkflowWorker();

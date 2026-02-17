@@ -41,16 +41,24 @@ export function ActivityBar({
       style={{ width: 48 }}
     >
       {items.map((item) => (
-        <Button
-          key={item.id}
-          variant="ghost"
-          size="icon"
-          className={`h-9 w-9 mb-1 ${item.active ? "bg-muted" : ""}`}
-          onClick={item.onClick}
-          title={item.label}
-        >
-          <item.icon className="h-4 w-4" />
-        </Button>
+        <div key={item.id} className="relative w-full flex justify-center mb-1">
+          {item.active && (
+            <div className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-6 bg-primary rounded-r" />
+          )}
+          <Button
+            variant="ghost"
+            size="icon"
+            className={`h-9 w-9 transition-colors ${
+              item.active 
+                ? "bg-muted hover:bg-muted/80 text-foreground" 
+                : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
+            }`}
+            onClick={item.onClick}
+            title={item.label}
+          >
+            <item.icon className="h-4 w-4" />
+          </Button>
+        </div>
       ))}
     </div>
   )

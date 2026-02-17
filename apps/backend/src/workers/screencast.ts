@@ -10,7 +10,7 @@ import { spawn } from 'child_process';
 import { db } from '../db/index.js';
 import { videoEntities } from '../db/schema/index.js';
 import { eq } from 'drizzle-orm';
-import type { ScreencastJobData } from '../lib/queue.js';
+import { screencastQueue, type ScreencastJobData } from '../lib/queue.js';
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 
@@ -661,7 +661,7 @@ worker.on('error', (e) => console.error('[Worker] Error', e));
 // Clean up stale jobs on startup (jobs that were active when worker crashed)
 (async () => {
   try {
-    const activeJobs = await worker.getActive();
+    const activeJobs = await screencastQueue.getActive();
     console.log(`[Worker] Cleaning ${activeJobs.length} stale jobs from previous run...`);
     for (const job of activeJobs) {
       if (job.data?.videoId) {

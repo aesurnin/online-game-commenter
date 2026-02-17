@@ -50,3 +50,9 @@ export const providerTemplates = pgTable('provider_template', {
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow(),
 });
+
+/** App-level env vars (UI-managed). Applied on top of .env and available as process.env[key]. */
+export const appEnv = pgTable('app_env', {
+  key: text('key').primaryKey(),
+  value: text('value').notNull().default(''),
+});

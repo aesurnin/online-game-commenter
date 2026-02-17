@@ -676,7 +676,6 @@ export function ProjectView({
                   }}
                 >
                   <span className="font-medium">{getVideoLabel(selectedVideo)}</span>
-                  <Pencil className="h-3.5 w-3.5 text-muted-foreground" />
                 </div>
               )}
             </div>

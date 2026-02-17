@@ -25,7 +25,7 @@ export interface WorkflowDefinition {
 export interface ModuleParamSchema {
   key: string;
   label: string;
-  type: 'number' | 'string' | 'boolean';
+  type: 'number' | 'string' | 'boolean' | 'prompt';
   default?: unknown;
   min?: number;
   max?: number;
@@ -47,6 +47,8 @@ export interface ModuleMeta {
   type: string;
   label: string;
   description?: string;
+  /** Category for grouping in the add-step picker (e.g. Video, LLM) */
+  category?: string;
   paramsSchema?: ModuleParamSchema[];
   /** Keys of params to show in quick (collapsed) view */
   quickParams?: string[];
@@ -72,6 +74,8 @@ export interface WorkflowContext {
   tempDir: string;
   /** This module's cache directory for outputs */
   moduleCacheDir?: string;
+  /** Path to text output file (e.g. .txt/.md) produced by this module; used when output slot kind is 'text' */
+  currentTextOutputPath?: string;
   /** Optional: report progress (0-100) and message during module execution */
   onProgress?: (percent: number, message: string) => void;
   /** Optional: append log line */

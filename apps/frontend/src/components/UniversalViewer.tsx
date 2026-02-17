@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react"
+import { useState, useCallback, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import type { PreviewAssetState, PreviewAssetMetadata } from "@/contexts/PreviewVideoContext"
 
@@ -105,6 +105,58 @@ function getFullUrl(url: string): string {
   return `${window.location.origin}${url.startsWith("/") ? "" : "/"}${url}`
 }
 
+function isTextContentType(contentType: string, url: string): boolean {
+  if (contentType.startsWith("text/")) return true
+  const u = url.split("?")[0].toLowerCase()
+  return u.endsWith(".txt") || u.endsWith(".md")
+}
+
+function TextContentPreview({ url, contentType }: { url: string; contentType: string }) {
+  const [text, setText] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setError(null)
+    setText(null)
+    const fetchUrl = url.startsWith("http") || url.startsWith("/") ? url : getFullUrl(url)
+    fetch(fetchUrl, { credentials: "include" })
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        return r.text()
+      })
+      .then((body) => {
+        if (!cancelled) setText(body)
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e))
+      })
+    return () => { cancelled = true }
+  }, [url])
+
+  if (error) {
+    return (
+      <div className="p-4 text-destructive text-sm">
+        Failed to load: {error}
+      </div>
+    )
+  }
+  if (text === null) {
+    return (
+      <div className="p-8 text-center text-muted-foreground text-sm">
+        Loading…
+      </div>
+    )
+  }
+  return (
+    <div className="p-4 h-full min-h-[200px] max-h-[70vh] overflow-auto bg-background text-foreground">
+      <pre className="text-xs font-mono whitespace-pre-wrap break-words m-0">
+        {text}
+      </pre>
+    </div>
+  )
+}
+
 export function UniversalViewer({ asset, onClose }: UniversalViewerProps) {
   const [mediaMetadata, setMediaMetadata] = useState<Partial<PreviewAssetMetadata>>({})
 
@@ -127,6 +179,7 @@ export function UniversalViewer({ asset, onClose }: UniversalViewerProps) {
   const contentType = asset.contentType ?? ""
   const isVideo = contentType.startsWith("video/")
   const isImage = contentType.startsWith("image/")
+  const isText = isTextContentType(contentType, asset.url)
   const mergedMetadata = { ...asset.metadata, ...mediaMetadata }
   const fullUrl = getFullUrl(asset.url)
 
@@ -141,7 +194,7 @@ export function UniversalViewer({ asset, onClose }: UniversalViewerProps) {
             Back to original
           </Button>
         </div>
-        <div className="aspect-video flex items-center justify-center bg-black">
+        <div className="aspect-video flex items-center justify-center bg-black min-h-[200px]">
           {isVideo && (
             <video
               src={asset.url}
@@ -158,7 +211,10 @@ export function UniversalViewer({ asset, onClose }: UniversalViewerProps) {
               onLoad={handleImageLoad}
             />
           )}
-          {!isVideo && !isImage && (
+          {isText && (
+            <TextContentPreview url={asset.url} contentType={contentType || "text/plain"} />
+          )}
+          {!isVideo && !isImage && !isText && (
             <div className="p-8 text-center text-muted-foreground">
               <p className="text-sm">Preview not available for this file type</p>
               <p className="text-xs mt-1">{contentType || "Unknown type"}</p>

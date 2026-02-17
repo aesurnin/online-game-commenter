@@ -14,6 +14,8 @@ export interface WorkflowJobState {
   logs: string[];
   stepIndex?: number;
   outputUrl?: string;
+  /** MIME type of output (e.g. text/plain, text/markdown) when output is a text file */
+  outputContentType?: string;
   error?: string;
   stepResults?: { index: number; moduleId: string; success: boolean; error?: string }[];
   projectId?: string;
@@ -61,7 +63,7 @@ export function listJobs(): WorkflowJobState[] {
 
 export function updateJob(
   jobId: string,
-  update: Partial<Pick<WorkflowJobState, 'status' | 'progress' | 'message' | 'outputUrl' | 'error' | 'stepResults'>>
+  update: Partial<Pick<WorkflowJobState, 'status' | 'progress' | 'message' | 'outputUrl' | 'outputContentType' | 'error' | 'stepResults'>>
 ) {
   const state = jobs.get(jobId);
   if (state) Object.assign(state, update);

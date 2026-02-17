@@ -100,16 +100,45 @@
     background: hsl(var(--border));
     cursor: col-resize;
     transition: background 0.15s;
+    pointer-events: auto;
   }
   [data-separator]:hover,
   [data-separator][data-resize-handle-active] {
     background: hsl(var(--primary) / 0.4);
   }
-  [data-group][data-panel-group-direction="vertical"] [data-separator] {
-    width: auto;
-    min-width: auto;
-    height: 1px;
-    min-height: 1px;
-    cursor: row-resize;
+  /* Vertical separators (workflow/logs, etc.): thin hit area + grip */
+  [data-group][data-panel-group-direction="vertical"] [data-separator],
+  .right-panel-group [data-separator] {
+    width: auto !important;
+    min-width: auto !important;
+    height: 6px !important;
+    min-height: 6px !important;
+    cursor: row-resize !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    background: transparent !important;
+    flex-shrink: 0;
+    pointer-events: auto !important;
+  }
+  [data-group][data-panel-group-direction="vertical"] [data-separator]::after,
+  .right-panel-group [data-separator]::after {
+    content: "";
+    width: 24px;
+    height: 2px;
+    border-radius: 1px;
+    background: hsl(var(--muted-foreground) / 0.5);
+  }
+  [data-group][data-panel-group-direction="vertical"] [data-separator]:hover,
+  [data-group][data-panel-group-direction="vertical"] [data-separator][data-resize-handle-active],
+  .right-panel-group [data-separator]:hover,
+  .right-panel-group [data-separator][data-resize-handle-active] {
+    background: hsl(var(--primary) / 0.25) !important;
+  }
+  [data-group][data-panel-group-direction="vertical"] [data-separator]:hover::after,
+  [data-group][data-panel-group-direction="vertical"] [data-separator][data-resize-handle-active]::after,
+  .right-panel-group [data-separator]:hover::after,
+  .right-panel-group [data-separator][data-resize-handle-active]::after {
+    background: hsl(var(--primary));
   }
 }

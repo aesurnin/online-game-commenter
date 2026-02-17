@@ -28,6 +28,7 @@ export const videoCropMeta = {
   type: 'video.crop',
   label: 'Crop Video',
   description: 'Crop video by percentage (4 edges: left, top, right, bottom)',
+  category: 'Video',
   quickParams: ['left', 'top', 'right', 'bottom'],
   inputSlots: [{ key: 'video', label: 'Video', kind: 'video' as const }],
   outputSlots: [{ key: 'video', label: 'Video', kind: 'video' as const }],

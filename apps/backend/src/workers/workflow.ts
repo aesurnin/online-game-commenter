@@ -65,7 +65,14 @@ async function processWorkflowJob(job: Job<WorkflowJobData>) {
       throw new Error(result.error);
     }
 
-    if (result.context?.currentVideoPath) {
+    const lastStep = result.lastStepOutput;
+    if (lastStep?.kind === 'text') {
+      const pathEnc = encodeURIComponent(lastStep.relativePath);
+      const folderEnc = encodeURIComponent(lastStep.cacheFolderName);
+      const outputUrl = `/api/projects/${projectId}/videos/${videoId}/workflow-cache/${folderEnc}/file?path=${pathEnc}`;
+      const outputContentType = lastStep.relativePath.toLowerCase().endsWith('.md') ? 'text/markdown' : 'text/plain';
+      updateJob(jobId, { outputUrl, outputContentType });
+    } else if (result.context?.currentVideoPath) {
       try {
         const buf = await fs.readFile(result.context.currentVideoPath);
         const suffix = stepIndex != null ? `step-${stepIndex}.mp4` : 'full.mp4';

@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { CropModal } from "@/components/CropModal"
+import { PromptBuilderModal } from "@/components/PromptBuilderModal"
 import {
   Plus,
   Trash2,
@@ -17,10 +18,12 @@ import {
   Save,
   Eye,
   Crop as CropIcon,
+  Pencil,
 } from "lucide-react"
 import { useSelectedVideo } from "@/contexts/SelectedVideoContext"
 import { useLogs } from "@/contexts/LogsContext"
 import { usePreviewVideo } from "@/contexts/PreviewVideoContext"
+import { useAddStepPanel } from "@/contexts/AddStepPanelContext"
 
 type WorkflowModuleDef = {
   id: string
@@ -63,6 +66,7 @@ type VideoWorkflowState = {
   workflow: WorkflowDefinition | null
   stepStatuses: Record<number, StepStatus>
   stepOutputUrls: Record<number, string>
+  stepOutputContentTypes: Record<number, string>
   activeJobId: string | null
   activeJobStepIndex: number | undefined
   jobProgress: number
@@ -76,6 +80,7 @@ const defaultVideoState = (): VideoWorkflowState => ({
   workflow: null,
   stepStatuses: {},
   stepOutputUrls: {},
+  stepOutputContentTypes: {},
   activeJobId: null,
   activeJobStepIndex: undefined,
   jobProgress: 0,
@@ -110,6 +115,7 @@ function saveToCache(projectId: string, videoId: string, state: VideoWorkflowSta
       workflow: state.workflow,
       stepStatuses: state.stepStatuses,
       stepOutputUrls: state.stepOutputUrls,
+      stepOutputContentTypes: state.stepOutputContentTypes,
       jobLogs: state.jobLogs.slice(-MAX_CACHED_LOGS),
     }
     localStorage.setItem(getCacheKey(projectId, videoId), JSON.stringify(toSave))
@@ -126,15 +132,16 @@ export function WorkflowEditor() {
   const { selectedVideo, refreshAssets } = useSelectedVideo()
   const { addLog } = useLogs()
   const { setPreviewVideo } = usePreviewVideo()
+  const { openAddStepPanel, closeAddStepPanel, setOnSelectModule } = useAddStepPanel()
   const [workflows, setWorkflows] = useState<{ id: string; name?: string }[]>([])
   const [stateByVideo, setStateByVideo] = useState<Record<string, VideoWorkflowState>>({})
   const [moduleTypes, setModuleTypes] = useState<ModuleMeta[]>([])
   const [saving, setSaving] = useState(false)
   const [newWorkflowName, setNewWorkflowName] = useState("")
-  const [addStepPopoverOpen, setAddStepPopoverOpen] = useState(false)
   const [expandedModuleIndex, setExpandedModuleIndex] = useState<number | null>(null)
   const [cropModalOpen, setCropModalOpen] = useState(false)
   const [cropModuleIndex, setCropModuleIndex] = useState<number | null>(null)
+  const [openPromptBuilder, setOpenPromptBuilder] = useState<{ index: number; paramKey: string } | null>(null)
   const [autoSave, setAutoSave] = useState(() => {
     try {
       return localStorage.getItem(AUTOSAVE_KEY) !== "false"
@@ -142,7 +149,6 @@ export function WorkflowEditor() {
       return true
     }
   })
-  const addStepPopoverRef = useRef<HTMLDivElement>(null)
 
   const projectId = selectedVideo?.projectId
   const videoId = selectedVideo?.videoId
@@ -153,6 +159,7 @@ export function WorkflowEditor() {
     workflow,
     stepStatuses,
     stepOutputUrls,
+    stepOutputContentTypes,
     activeJobId,
     jobProgress,
     jobMessage,
@@ -163,6 +170,7 @@ export function WorkflowEditor() {
   const isJobForCurrentVideo = activeJobId && videoId
   const showProgress = isJobForCurrentVideo
   const activeJobVideoIdRef = useRef<string | null>(null)
+  const addModuleRef = useRef<(type: string) => void>(() => {})
 
   const updateVideoState = useCallback((vid: string, updates: Partial<VideoWorkflowState>) => {
     setStateByVideo((prev) => ({
@@ -199,17 +207,6 @@ export function WorkflowEditor() {
     fetchWorkflows()
     fetchModuleTypes()
   }, [fetchWorkflows, fetchModuleTypes])
-
-  useEffect(() => {
-    if (!addStepPopoverOpen) return
-    const handleClickOutside = (e: MouseEvent) => {
-      if (addStepPopoverRef.current && !addStepPopoverRef.current.contains(e.target as Node)) {
-        setAddStepPopoverOpen(false)
-      }
-    }
-    document.addEventListener("mousedown", handleClickOutside)
-    return () => document.removeEventListener("mousedown", handleClickOutside)
-  }, [addStepPopoverOpen])
 
   useEffect(() => {
     if (!projectId || !videoId) return
@@ -272,10 +269,11 @@ export function WorkflowEditor() {
           if (job.status === "completed") {
             const idx = stepIndex ?? (wf?.modules.length ?? 0) - 1
             const stepOutputUrls = idx >= 0 && job.outputUrl ? { ...current.stepOutputUrls, [idx]: job.outputUrl } : current.stepOutputUrls
+            const stepOutputContentTypes = idx >= 0 && job.outputContentType ? { ...current.stepOutputContentTypes, [idx]: job.outputContentType } : current.stepOutputContentTypes
             const statuses: Record<number, StepStatus> = {}
             const endIdx = stepIndex != null ? stepIndex + 1 : (wf?.modules.length ?? 0)
             for (let i = 0; i < endIdx; i++) statuses[i] = "done"
-            return { ...prev, [jobVideoId]: { ...next, activeJobId: null, runningAll: false, jobProgress: 100, stepOutputUrls, stepStatuses: statuses } }
+            return { ...prev, [jobVideoId]: { ...next, activeJobId: null, runningAll: false, jobProgress: 100, stepOutputUrls, stepOutputContentTypes, stepStatuses: statuses } }
           }
           const failedIdx = job.stepResults?.findIndex((s: { success: boolean }) => !s.success) ?? stepIndex ?? 0
           const statuses: Record<number, StepStatus> = {}
@@ -393,6 +391,12 @@ export function WorkflowEditor() {
         const match = v?.match(/^video_(\d+)$/)
         return match ? Math.max(n, parseInt(match[1], 10)) : n
       }, 0) + 1
+    const nextTextNum =
+      prevModules.reduce((n, m) => {
+        const v = m.outputs?.text
+        const match = v?.match(/^text_(\d+)$/)
+        return match ? Math.max(n, parseInt(match[1], 10)) : n
+      }, 0) + 1
     const inputs: Record<string, string> = {}
     const outputs: Record<string, string> = {}
     for (const slot of meta?.inputSlots ?? []) {
@@ -403,6 +407,9 @@ export function WorkflowEditor() {
     for (const slot of meta?.outputSlots ?? []) {
       if (slot.kind === "video") {
         outputs[slot.key] = `video_${nextVideoNum}`
+      }
+      if (slot.kind === "text") {
+        outputs[slot.key] = `text_${nextTextNum}`
       }
     }
     const newMod: WorkflowModuleDef = {
@@ -431,6 +438,19 @@ export function WorkflowEditor() {
         .catch(() => {})
     }
   }
+  addModuleRef.current = addModule
+
+  useEffect(() => {
+    if (!workflow || !videoId) {
+      setOnSelectModule(null)
+      return
+    }
+    setOnSelectModule((type: string) => {
+      addModuleRef.current(type)
+      closeAddStepPanel()
+    })
+    return () => setOnSelectModule(null)
+  }, [workflow, videoId, setOnSelectModule, closeAddStepPanel])
 
   const removeModule = (index: number) => {
     if (!projectId || !videoId || !workflow) return
@@ -596,8 +616,8 @@ export function WorkflowEditor() {
   const getModuleLabel = (type: string) =>
     moduleTypes.find((m) => m.type === type)?.label ?? type
 
-  const handlePreview = (url: string, label: string) => {
-    setPreviewVideo({ url, label, contentType: "video/mp4" })
+  const handlePreview = (url: string, label: string, contentType?: string) => {
+    setPreviewVideo({ url, label, contentType: contentType ?? "video/mp4" })
   }
 
   const handleOpenCrop = (index: number) => {
@@ -755,52 +775,48 @@ export function WorkflowEditor() {
                   onInputsChange={(inputs) => updateModuleInputs(idx, inputs)}
                   onOutputsChange={(outputs) => updateModuleOutputs(idx, outputs)}
                   onRunStep={() => runStep(idx)}
-                  onPreview={() => stepOutputUrls[idx] && handlePreview(stepOutputUrls[idx], `Step ${idx + 1}`)}
+                  onPreview={() => stepOutputUrls[idx] && handlePreview(stepOutputUrls[idx], `Step ${idx + 1}`, stepOutputContentTypes[idx])}
                   getModuleLabel={getModuleLabel}
                   getAvailableVariables={() => getAvailableVariablesForModule(idx)}
                   onOpenCrop={() => handleOpenCrop(idx)}
+                  onOpenPromptBuilder={(paramKey) => setOpenPromptBuilder({ index: idx, paramKey })}
                 />
               ))}
-            </div>
-
-            <div className="relative pt-1" ref={addStepPopoverRef}>
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-8 text-xs border-dashed"
-                onClick={() => setAddStepPopoverOpen((o) => !o)}
-              >
-                <Plus className="h-3.5 w-3.5 mr-1.5" />
-                Add step
-              </Button>
-              {addStepPopoverOpen && (
-                <div className="absolute left-0 top-full mt-2 z-50 min-w-[220px] rounded-lg border bg-background p-1.5 shadow-lg">
-                  <div className="max-h-64 overflow-y-auto space-y-0.5">
-                    {moduleTypes.map((m) => (
-                      <button
-                        key={m.type}
-                        type="button"
-                        className="w-full text-left px-3 py-2 text-sm rounded-md hover:bg-accent hover:text-accent-foreground transition-colors"
-                        onClick={() => {
-                          addModule(m.type)
-                          setAddStepPopoverOpen(false)
-                        }}
-                      >
-                        <span className="font-medium">{m.label}</span>
-                        {m.description && (
-                          <span className="block text-xs text-muted-foreground truncate mt-0.5">
-                            {m.description}
-                          </span>
-                        )}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
+              <div className="flex justify-center pt-1.5">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7 rounded-full text-muted-foreground hover:text-foreground hover:bg-muted/80"
+                  onClick={openAddStepPanel}
+                  title="Add step"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                </Button>
+              </div>
             </div>
           </>
         )}
       </div>
+      {openPromptBuilder && workflow && (() => {
+        const { index, paramKey } = openPromptBuilder
+        const mod = workflow.modules[index]
+        const params = mod?.params ?? {}
+        const currentValue = String(params[paramKey] ?? "")
+        const meta = moduleTypes.find((m) => m.type === mod?.type)
+        const paramLabel = meta?.paramsSchema?.find((p) => p.key === paramKey)?.label ?? paramKey
+        return (
+          <PromptBuilderModal
+            isOpen={true}
+            onClose={() => setOpenPromptBuilder(null)}
+            value={currentValue}
+            onChange={(v) => updateModuleParams(index, { ...params, [paramKey]: v })}
+            availableVariables={getAvailableVariablesForModule(index)}
+            label={paramLabel}
+          />
+        )
+      })()}
+
       {cropModalOpen && cropModuleIndex !== null && workflow && (selectedVideo?.streamUrl ?? selectedVideo?.playUrl) && (
         <CropModal
           isOpen={cropModalOpen}
@@ -842,6 +858,7 @@ function ModuleBlock({
   getModuleLabel,
   getAvailableVariables,
   onOpenCrop,
+  onOpenPromptBuilder,
 }: {
   module: WorkflowModuleDef
   index: number
@@ -861,6 +878,7 @@ function ModuleBlock({
   getModuleLabel: (type: string) => string
   getAvailableVariables: () => string[]
   onOpenCrop?: () => void
+  onOpenPromptBuilder?: (paramKey: string) => void
 }) {
   const meta = moduleTypes.find((m) => m.type === module.type)
   const params = module.params ?? {}
@@ -877,6 +895,24 @@ function ModuleBlock({
   const renderParam = (p: { key: string; label: string; type: string; default?: unknown; min?: number; max?: number; options?: { value: string; label: string }[] }) => (
     <div key={p.key} className="flex items-center gap-2">
       <label className="text-xs text-muted-foreground w-20 shrink-0">{p.label}</label>
+      {p.type === "prompt" && (
+        <div className="flex-1 flex items-center gap-2 min-w-0">
+          <span className="text-xs text-muted-foreground truncate flex-1 min-w-0">
+            {(String(params[p.key] ?? p.default ?? "") || "Empty").slice(0, 60)}
+            {(String(params[p.key] ?? p.default ?? "").length > 60) ? "…" : ""}
+          </span>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-7 shrink-0"
+            onClick={() => onOpenPromptBuilder?.(p.key)}
+          >
+            <Pencil className="h-3 w-3 mr-1" />
+            Edit
+          </Button>
+        </div>
+      )}
       {p.type === "number" && (() => {
         const raw = Number(params[p.key] ?? p.default ?? 0)
         const clamped = p.min != null || p.max != null

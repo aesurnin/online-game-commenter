@@ -9,6 +9,8 @@ import { UniversalViewer } from "@/components/UniversalViewer"
 import { useLogs } from "@/contexts/LogsContext"
 import { useSelectedVideo } from "@/contexts/SelectedVideoContext"
 import { usePreviewVideo } from "@/contexts/PreviewVideoContext"
+import { useAddStepPanel } from "@/contexts/AddStepPanelContext"
+import { ModulePickerPanel } from "@/components/ModulePickerPanel"
 
 const PROJECT_LAYOUT_STORAGE_KEY = "project-layout-videos-assets-main"
 const PROJECT_PANELS_VISIBLE_KEY = "project-panels-visible"
@@ -96,6 +98,7 @@ export function ProjectView({
   const { addLog, setActiveVideoId, fetchLogsForVideo } = useLogs()
   const { setSelectedVideo: setGlobalSelectedVideo } = useSelectedVideo()
   const { previewVideo, setPreviewVideo } = usePreviewVideo()
+  const { addStepPanelOpen } = useAddStepPanel()
 
   async function fetchProject() {
     if (!id) return
@@ -652,7 +655,8 @@ export function ProjectView({
         <Separator className="shrink-0" />
             </>
           )}
-        <Panel id="main" defaultSize={`${layout.main}%`} minSize="25%" className="min-w-0 flex flex-col bg-panel-0">
+        <Panel id="main" defaultSize={`${layout.main}%`} minSize="25%" className="min-w-0 flex flex-col bg-panel-0 relative">
+          <>
           {selectedVideo && !showAddForm && (
             <div className="w-full max-w-4xl mx-auto px-6 pt-3 pb-2 flex items-center gap-2 shrink-0">
               {editingVideoId === selectedVideo.id ? (
@@ -899,6 +903,12 @@ export function ProjectView({
           </div>
         )}
           </div>
+          {addStepPanelOpen && (
+            <div className="absolute inset-0 z-10 flex flex-col bg-background/95 backdrop-blur-[2px]">
+              <ModulePickerPanel />
+            </div>
+          )}
+          </>
         </Panel>
       </Group>
 

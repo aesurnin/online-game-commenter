@@ -4,6 +4,7 @@ import type { LucideIcon } from "lucide-react"
 export function ActivityBar({
   items,
   orientation = "horizontal",
+  side = "left",
   className = "",
 }: {
   items: Array<{
@@ -14,8 +15,10 @@ export function ActivityBar({
     onClick: () => void
   }>
   orientation?: "horizontal" | "vertical"
+  side?: "left" | "right"
   className?: string
 }) {
+  if (items.length === 0) return null
   if (orientation === "horizontal") {
     return (
       <div className={`flex flex-row items-center gap-1 px-2 py-1 border-b border-border bg-panel-1 shrink-0 ${className}`}>
@@ -35,15 +38,16 @@ export function ActivityBar({
     )
   }
 
+  const isRight = side === "right"
   return (
     <div
-      className={`flex flex-col items-center pt-16 pb-2 border-r border-border bg-panel-1 shrink-0 ${className}`}
+      className={`flex flex-col items-center pt-16 pb-2 border-border bg-panel-1 shrink-0 ${isRight ? "border-l" : "border-r"} ${className}`}
       style={{ width: 48 }}
     >
       {items.map((item) => (
         <div key={item.id} className="relative w-full flex justify-center mb-1">
           {item.active && (
-            <div className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-6 bg-primary rounded-r" />
+            <div className={`absolute top-1/2 -translate-y-1/2 w-0.5 h-6 bg-primary ${isRight ? "right-0 rounded-l" : "left-0 rounded-r"}`} />
           )}
           <Button
             variant="ghost"

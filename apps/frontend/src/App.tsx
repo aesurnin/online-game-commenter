@@ -12,6 +12,7 @@ import { Providers } from "@/pages/Providers"
 import { LogsProvider, useLogs } from "@/contexts/LogsContext"
 import { SelectedVideoProvider } from "@/contexts/SelectedVideoContext"
 import { PreviewVideoProvider } from "@/contexts/PreviewVideoContext"
+import { AddStepPanelProvider } from "@/contexts/AddStepPanelContext"
 import { ThemeProvider, useTheme } from "@/contexts/ThemeContext"
 import { ActivityBar } from "@/components/ActivityBar"
 import { RightPanel } from "@/components/RightPanel"
@@ -246,6 +247,7 @@ function AppLayout() {
       <div className="flex-1 flex min-h-0">
         <ActivityBar
         orientation="vertical"
+        side="left"
         items={[
           ...(isProjectPage
             ? [
@@ -265,17 +267,67 @@ function AppLayout() {
                 },
               ]
             : []),
-          ...(isProjectPage
-            ? [
-                {
-                  id: "workflow",
-                  icon: GitBranch,
-                  label: "Workflow",
-                  active: workflowVisible,
-                  onClick: () => setWorkflowVisible((v) => !v),
-                },
-              ]
-            : []),
+        ]}
+      />
+      <AddStepPanelProvider>
+        <Group
+          id="app-main-right"
+          orientation="horizontal"
+          className="flex-1"
+          defaultLayout={{ main: layout.main, right: layout.right }}
+          resizeTargetMinimumSize={{ coarse: 24, fine: 6 }}
+          onLayoutChanged={(l) => {
+            if (typeof l.main === "number" && typeof l.right === "number") {
+              localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify({ main: l.main, right: l.right }))
+            }
+          }}
+        >
+          <Panel id="main" defaultSize={`${layout.main}%`} minSize="20%" className="min-w-0">
+            <main className="h-full overflow-auto">
+              <Routes>
+                <Route path="/login" element={<Login />} />
+                <Route path="/dashboard" element={<Dashboard />} />
+                <Route
+                  path="/projects/:id"
+                  element={
+                    <ProjectView
+                      videosVisible={videosVisible}
+                      assetsVisible={assetsVisible}
+                    />
+                  }
+                />
+                <Route path="/queue" element={<QueueMonitor />} />
+                <Route path="/providers" element={<Providers />} />
+                <Route path="/" element={<Navigate to="/dashboard" replace />} />
+                <Route path="*" element={<Navigate to="/dashboard" replace />} />
+              </Routes>
+            </main>
+          </Panel>
+          <Separator className="shrink-0" />
+          <Panel
+            id="right"
+            panelRef={rightPanelRef}
+            defaultSize={`${layout.right}%`}
+            minSize="15%"
+            maxSize="60%"
+            collapsible
+            collapsedSize={40}
+            className="min-w-0 flex flex-col"
+          >
+            <RightPanel panelRef={rightPanelRef} workflowVisible={workflowVisible} logsVisible={logsVisible} />
+          </Panel>
+        </Group>
+      <ActivityBar
+        orientation="vertical"
+        side="right"
+        items={[
+          {
+            id: "workflow",
+            icon: GitBranch,
+            label: "Workflow",
+            active: workflowVisible,
+            onClick: () => setWorkflowVisible((v) => !v),
+          },
           {
             id: "logs",
             icon: FileText,
@@ -285,53 +337,7 @@ function AppLayout() {
           },
         ]}
       />
-      <Group
-        id="app-main-right"
-        orientation="horizontal"
-        className="flex-1"
-        defaultLayout={{ main: layout.main, right: layout.right }}
-        resizeTargetMinimumSize={{ coarse: 24, fine: 6 }}
-        onLayoutChanged={(l) => {
-          if (typeof l.main === "number" && typeof l.right === "number") {
-            localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify({ main: l.main, right: l.right }))
-          }
-        }}
-      >
-        <Panel id="main" defaultSize={`${layout.main}%`} minSize="20%" className="min-w-0">
-          <main className="h-full overflow-auto">
-            <Routes>
-              <Route path="/login" element={<Login />} />
-              <Route path="/dashboard" element={<Dashboard />} />
-              <Route
-                path="/projects/:id"
-                element={
-                  <ProjectView
-                    videosVisible={videosVisible}
-                    assetsVisible={assetsVisible}
-                  />
-                }
-              />
-              <Route path="/queue" element={<QueueMonitor />} />
-              <Route path="/providers" element={<Providers />} />
-              <Route path="/" element={<Navigate to="/dashboard" replace />} />
-              <Route path="*" element={<Navigate to="/dashboard" replace />} />
-            </Routes>
-          </main>
-        </Panel>
-        <Separator className="shrink-0" />
-        <Panel
-          id="right"
-          panelRef={rightPanelRef}
-          defaultSize={`${layout.right}%`}
-          minSize="15%"
-          maxSize="60%"
-          collapsible
-          collapsedSize={40}
-          className="min-w-0 flex flex-col"
-        >
-          <RightPanel panelRef={rightPanelRef} workflowVisible={workflowVisible} logsVisible={logsVisible} />
-        </Panel>
-      </Group>
+      </AddStepPanelProvider>
       </div>
     </div>
   )

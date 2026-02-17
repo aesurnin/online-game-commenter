@@ -127,6 +127,7 @@ const MIME_BY_EXT: Record<string, string> = {
   '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime', '.mkv': 'video/x-matroska',
   '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp',
   '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.ogg': 'audio/ogg', '.m4a': 'audio/mp4',
+  '.txt': 'text/plain', '.md': 'text/markdown',
 };
 
 /** Resolve absolute path for a file in workflow cache. filePath is relative to folder (e.g. "output.mp4" or "subdir/file.mp4"). */
@@ -203,6 +204,8 @@ export interface RunResult {
   error?: string;
   context?: WorkflowContext;
   stepResults?: { index: number; moduleId: string; success: boolean; error?: string }[];
+  /** When the last run step produced a text file (e.g. OpenRouter); worker uses this to set outputUrl to cache file URL */
+  lastStepOutput?: { kind: 'text'; path: string; cacheFolderName: string; relativePath: string };
 }
 
 /** Download video from R2 to local temp and return path */
@@ -265,6 +268,7 @@ export async function runWorkflow(options: RunOptions): Promise<RunResult> {
   const startIdx = stepIndex ?? 0;
   const endIdx = stepIndex != null ? stepIndex + 1 : modules.length;
   const stepResults: RunResult['stepResults'] = [];
+  let lastStepOutput: RunResult['lastStepOutput'];
 
   for (let i = startIdx; i < endIdx; i++) {
     if (onCheckCancel?.()) {
@@ -319,9 +323,25 @@ export async function runWorkflow(options: RunOptions): Promise<RunResult> {
       if (result.context.currentVideoPath) {
         context.currentVideoPath = result.context.currentVideoPath;
       }
-      const outputVar = def.outputs?.video;
-      if (outputVar && result.context.currentVideoPath) {
-        variables[outputVar] = result.context.currentVideoPath;
+      const outputVideoVar = def.outputs?.video;
+      if (outputVideoVar && result.context.currentVideoPath) {
+        variables[outputVideoVar] = result.context.currentVideoPath;
+      }
+      const outputTextVar = def.outputs?.text;
+      if (outputTextVar && result.context.currentTextOutputPath) {
+        variables[outputTextVar] = result.context.currentTextOutputPath;
+        if (i === endIdx - 1) {
+          const cacheFolderName = path.basename(moduleCacheDir);
+          lastStepOutput = {
+            kind: 'text',
+            path: result.context.currentTextOutputPath,
+            cacheFolderName,
+            relativePath: path.basename(result.context.currentTextOutputPath),
+          };
+        }
+      }
+      if (result.context.variables) {
+        Object.assign(variables, result.context.variables);
       }
       Object.assign(context, { ...result.context, variables: context.variables });
     }
@@ -330,5 +350,5 @@ export async function runWorkflow(options: RunOptions): Promise<RunResult> {
 
   onProgress?.(100, 'Done');
   onLog?.('Workflow completed successfully');
-  return { success: true, context, stepResults };
+  return { success: true, context, stepResults, lastStepOutput };
 }

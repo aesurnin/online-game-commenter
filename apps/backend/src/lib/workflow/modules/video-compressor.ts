@@ -21,6 +21,7 @@ export const videoCompressorMeta = {
   type: 'video.compress',
   label: 'Compress Video',
   description: 'Compress video quality and reduce file size using FFmpeg',
+  category: 'Video',
   quickParams: ['crf'],
   inputSlots: [{ key: 'video', label: 'Video', kind: 'video' as const }],
   outputSlots: [{ key: 'video', label: 'Video', kind: 'video' as const }],

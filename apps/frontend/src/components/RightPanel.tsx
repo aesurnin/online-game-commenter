@@ -93,9 +93,9 @@ export function RightPanel({
         key={`${workflowVisible}-${logsVisible}`}
         id="right-workflow-logs"
         orientation="vertical"
-        className="flex-1 min-h-0"
+        className="flex-1 min-h-0 right-panel-group"
         defaultLayout={rightLayout as { [id: string]: number }}
-        resizeTargetMinimumSize={{ coarse: 24, fine: 6 }}
+        resizeTargetMinimumSize={{ coarse: 32, fine: 20 }}
         onLayoutChanged={(l) => {
           if (typeof l.workflow === "number" && typeof l.logs === "number") {
             localStorage.setItem(RIGHT_LAYOUT_STORAGE_KEY, JSON.stringify({ workflow: l.workflow, logs: l.logs }))
@@ -103,25 +103,30 @@ export function RightPanel({
         }}
       >
         {isProjectPage && workflowVisible && (
-          <>
-            <Panel
-              id="workflow"
-              defaultSize={`${rightLayout.workflow ?? 50}%`}
-              minSize="20%"
-              className="min-h-0 flex flex-col border-b border-border"
-            >
-              <div className="flex items-center justify-between px-2 py-2 border-b border-border/50 shrink-0" style={{ height: 32 }}>
-                <span className="text-xs text-muted-foreground/70 font-medium">WORKFLOW</span>
-              </div>
-              <div className="flex-1 min-h-0 overflow-hidden">
-                <WorkflowEditor />
-              </div>
-            </Panel>
-            <Separator className="shrink-0" />
-          </>
+          <Panel
+            id="workflow"
+            defaultSize={`${rightLayout.workflow ?? 50}%`}
+            minSize="20%"
+            className="min-h-0 flex flex-col border-b border-border"
+          >
+            <div className="flex items-center justify-between px-2 py-2 border-b border-border/50 shrink-0" style={{ height: 32 }}>
+              <span className="text-xs text-muted-foreground/70 font-medium">WORKFLOW</span>
+            </div>
+            <div className="flex-1 min-h-0 overflow-hidden">
+              <WorkflowEditor />
+            </div>
+          </Panel>
+        )}
+        {isProjectPage && workflowVisible && logsVisible && (
+          <Separator className="shrink-0" />
         )}
         {logsVisible && (
-          <Panel id="logs" defaultSize="100%" className="min-h-0 flex flex-col">
+          <Panel
+            id="logs"
+            defaultSize={`${rightLayout.logs ?? 50}%`}
+            minSize="20%"
+            className="min-h-0 flex flex-col"
+          >
             <LogsPanelHeader />
             <div className="flex-1 min-h-0 overflow-hidden">
               <LogsPanel embedded hideHeader />

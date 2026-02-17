@@ -34,6 +34,9 @@ const MIN_VIEWPORT_HEIGHT = 360;
 const MAX_VIEWPORT_WIDTH = 1920;
 const MAX_VIEWPORT_HEIGHT = 1080;
 
+// Window position off-screen so it does not steal focus or expand to fullscreen (headed mode required for proper rendering)
+const WINDOW_POSITION = process.env.SCREENCAST_WINDOW_POSITION || '9999,9999';
+
 async function resolveUrl(url: string): Promise<{ finalUrl: string; isHtml: boolean }> {
   const res = await fetch(url, {
     redirect: 'follow',
@@ -73,12 +76,15 @@ async function detectContentSize(page: { evaluate: (fn: () => unknown) => Promis
     }
     const w = Math.max(document.body.scrollWidth, document.documentElement.scrollWidth, window.innerWidth);
     const h = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight, window.innerHeight);
-    return { width: w || 1920, height: h || 1080 };
+    return { width: w || 1280, height: h || 720 };
   }) as { width: number; height: number };
+  
   let { width, height } = result;
-  const aspect = 16 / 9;
-  if (width / height > aspect) height = Math.round(width / aspect);
-  else width = Math.round(height * aspect);
+  
+  // Ensure dimensions are even (required by some encoders)
+  width = width % 2 === 0 ? width : width + 1;
+  height = height % 2 === 0 ? height : height + 1;
+
   return {
     width: Math.max(MIN_VIEWPORT_WIDTH, Math.min(MAX_VIEWPORT_WIDTH, width)),
     height: Math.max(MIN_VIEWPORT_HEIGHT, Math.min(MAX_VIEWPORT_HEIGHT, height)),
@@ -88,7 +94,26 @@ async function detectContentSize(page: { evaluate: (fn: () => unknown) => Promis
 async function injectFitCSS(page: { evaluate: (fn: () => void) => Promise<void> }): Promise<void> {
   await page.evaluate(() => {
     const style = document.createElement('style');
-    style.textContent = 'html, body { margin: 0; padding: 0; overflow: hidden !important; } canvas { max-width: 100vw !important; max-height: 100vh !important; object-fit: contain !important; } [class*="game"], [class*="replay"], [class*="Replay"] { max-width: 100vw !important; max-height: 100vh !important; overflow: hidden !important; }';
+    style.textContent = `
+      html, body { 
+        margin: 0 !important; 
+        padding: 0 !important; 
+        overflow: hidden !important; 
+        background: black !important;
+        width: 100vw !important;
+        height: 100vh !important;
+      } 
+      canvas, video, .game-container, [class*="game"], [class*="replay"], [class*="Replay"] { 
+        position: fixed !important;
+        top: 0 !important;
+        left: 0 !important;
+        width: 100vw !important; 
+        height: 100vh !important; 
+        max-width: none !important;
+        max-height: none !important;
+        object-fit: fill !important; 
+      }
+    `;
     document.head.appendChild(style);
   });
 }
@@ -222,26 +247,40 @@ async function runScreencastJob(jobData: ScreencastJobData): Promise<void> {
     log(`URL: ${finalUrl}`);
     if (!isHtml) throw new Error(`URL does not serve HTML: ${finalUrl}`);
     const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || puppeteer.executablePath();
-    const headless = process.env.SCREENCAST_HEADLESS === 'true';
+    // headless: 'new' = no visible window (macOS ignores --window-position). Set SCREENCAST_HEADLESS=false for visible window.
+    const useHeadless = process.env.SCREENCAST_HEADLESS !== 'false';
+    const { width: vw0, height: vh0 } = { width: DEFAULT_VIEWPORT_WIDTH, height: DEFAULT_VIEWPORT_HEIGHT };
+    
+    log(`Launch config: headless=${useHeadless}, BACKEND_URL=${BACKEND_URL}`);
+
     browser = await launch({
-      headless: headless ? 'new' : false,
+      headless: useHeadless,
       executablePath,
-      defaultViewport: { width: DEFAULT_VIEWPORT_WIDTH, height: DEFAULT_VIEWPORT_HEIGHT },
+      defaultViewport: { width: vw0, height: vh0, deviceScaleFactor: 2 },
       startDelay: 800,
       args: [
         '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--autoplay-policy=no-user-gesture-required',
-        '--window-position=9999,9999', '--allowlisted-extension-id=jjndjgheafjngoipoacpjgeicjeomjli',
+        '--allowlisted-extension-id=jjndjgheafjngoipoacpjgeicjeomjli',
+        `--window-size=${vw0},${vh0}`,
+        ...(useHeadless
+          ? ['--headless', '--enable-audio-service', '--mute-audio=false']
+          : [
+              `--window-position=${WINDOW_POSITION}`,
+              '--disable-background-timer-throttling',
+              '--disable-backgrounding-occluded-windows',
+              '--disable-renderer-backgrounding',
+            ]),
       ],
     });
     if (await isJobCancelled(videoId)) throw new JobCancelledError();
     const page = await browser.newPage();
-    await page.setViewport({ width: DEFAULT_VIEWPORT_WIDTH, height: DEFAULT_VIEWPORT_HEIGHT });
+    await page.setViewport({ width: vw0, height: vh0, deviceScaleFactor: 2 });
     if (await isJobCancelled(videoId)) throw new JobCancelledError();
     await page.goto(finalUrl, { waitUntil: 'networkidle2', timeout: 30000 });
     if (await isJobCancelled(videoId)) throw new JobCancelledError();
     const { width: vw, height: vh } = await detectContentSize(page);
-    log(`Viewport ${vw}x${vh}`);
-    await page.setViewport({ width: vw, height: vh });
+    log(`Content size detected: ${vw}x${vh} (Retina/DPR=2)`);
+    await page.setViewport({ width: vw, height: vh, deviceScaleFactor: 2 });
     await injectFitCSS(page);
     await new Promise((r) => setTimeout(r, 500));
     stopPreview = startLivePreview(page, videoId, log);

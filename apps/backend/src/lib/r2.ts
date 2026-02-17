@@ -60,35 +60,15 @@ export async function uploadToR2(
   const command = new PutObjectCommand({
     Bucket: BUCKET,
     Key: key,
+    Body: buffer,
     ContentType: ct,
   });
-  const presignedUrl = await getSignedUrl(s3, command, { expiresIn: 300 });
-  const tmpPath = path.join(os.tmpdir(), `r2-upload-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  await fs.writeFile(tmpPath, buffer);
+  
   try {
-    await new Promise<void>((resolve, reject) => {
-      const curl = spawn('curl', [
-        '-s', '-S', '-X', 'PUT', '-T', tmpPath,
-        '-H', `Content-Type: ${ct}`,
-        '--retry', '2',
-        presignedUrl,
-      ], { stdio: ['ignore', 'pipe', 'pipe'] });
-      let stderr = '';
-      curl.stderr?.on('data', (d) => { stderr += d.toString(); });
-      curl.on('close', (code) => {
-        if (code === 0) resolve();
-        else {
-          console.error(`[R2] Curl failed: ${stderr}`);
-          reject(new Error(`curl upload failed: ${code} - ${stderr}`));
-        }
-      });
-      curl.on('error', (err) => {
-        console.error(`[R2] Spawn error: ${err}`);
-        reject(err);
-      });
-    });
-  } finally {
-    await fs.unlink(tmpPath).catch(() => {});
+    await s3.send(command);
+  } catch (err) {
+    console.error(`[R2] Upload failed: ${err}`);
+    throw err;
   }
 }
 

@@ -45,7 +45,7 @@ server.addHook('preHandler', async (request, reply) => {
 // Routes
 import authRoutes from './routes/auth.js';
 import projectsRoutes from './routes/projects.js';
-import { queueRoutes } from './routes/queue.js';
+import queueRoutes from './routes/queue.js';
 import { internalRoutes } from './routes/internal.js';
 server.register(authRoutes, { prefix: '/auth' });
 server.register(projectsRoutes, { prefix: '/projects' });

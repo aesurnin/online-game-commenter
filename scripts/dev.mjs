@@ -67,11 +67,11 @@ async function main() {
   }
 
   const env = loadEnv();
-  const strategy = env.RECORDING_STRATEGY || 'docker';
+  const strategy = env.RECORDING_STRATEGY || 'puppeteer-stream';
   const useStreamWorker = strategy === 'puppeteer-stream';
 
   if (useStreamWorker) {
-    console.log('Starting Docker (postgres, redis only — worker runs locally with puppeteer-stream)...');
+    console.log('Starting Docker (postgres, redis only — worker runs locally)...');
     await run('docker-compose', ['stop', 'screencast-worker']).catch(() => {});
     await run('docker-compose', ['up', '-d', 'postgres', 'redis']);
   } else {
@@ -90,8 +90,12 @@ async function main() {
 
   if (useStreamWorker) {
     console.log('Starting backend, frontend, and worker...');
+    const workerEnv = [
+      'BACKEND_URL=http://localhost:3000',
+      env.SCREENCAST_PREVIEW_SECRET ? `SCREENCAST_PREVIEW_SECRET=${env.SCREENCAST_PREVIEW_SECRET}` : '',
+    ].filter(Boolean).join(' ');
     await run(
-      'npx concurrently -n backend,frontend,worker -c blue,green,magenta "npm run dev:backend" "npm run dev:frontend" "BACKEND_URL=http://localhost:3000 npm run worker"',
+      `npx concurrently -n backend,frontend,worker -c blue,green,magenta "npm run dev:backend" "npm run dev:frontend" "${workerEnv} npm run worker"`,
       []
     );
   } else {

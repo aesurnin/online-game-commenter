@@ -5,8 +5,8 @@ import { projects, videoEntities } from '../db/schema/index.js';
 import { and, eq } from 'drizzle-orm';
 import z from 'zod';
 import { uploadToR2, deleteFromR2, getPresignedUrl } from '../lib/r2.js';
-import { addScreencastJob } from '../lib/queue.js';
-import { getFrame } from '../lib/live-preview-store.js';
+import { addScreencastJob, removeScreencastJobByVideoId } from '../lib/queue.js';
+import { getFrame, clearFrame } from '../lib/live-preview-store.js';
 
 const projectsRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.addHook('preHandler', async (request, reply) => {
@@ -266,7 +266,8 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
     await db.update(videoEntities)
       .set({ status: 'cancelled', metadata: { cancelledAt: new Date().toISOString() } })
       .where(and(eq(videoEntities.id, videoId), eq(videoEntities.projectId, id)));
-
+    await removeScreencastJobByVideoId(videoId);
+    clearFrame(videoId);
     return reply.send({ success: true });
   });
 

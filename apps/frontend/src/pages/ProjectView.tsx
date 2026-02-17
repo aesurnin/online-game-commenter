@@ -226,10 +226,14 @@ export function ProjectView() {
     addLog(`Stopping recording ${video.id.slice(0, 8)}...`)
     setStopping(true)
     try {
+      const ctrl = new AbortController()
+      const t = setTimeout(() => ctrl.abort(), 15000)
       const r = await fetch(`/api/projects/${id}/videos/${video.id}/stop`, {
         method: "POST",
         credentials: "include",
+        signal: ctrl.signal,
       })
+      clearTimeout(t)
       if (r.ok) {
         addLog(`Recording will stop and save shortly (worker must be running)`)
         refreshVideosAndSelection()
@@ -237,8 +241,9 @@ export function ProjectView() {
         const err = await r.json().catch(() => ({}))
         addLog(`Stop failed: ${err.error || r.status}`, "error")
       }
-    } catch {
-      addLog("Stop failed: network error", "error")
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "network error"
+      addLog(`Stop failed: ${msg}. Is backend running on port 3000?`, "error")
     } finally {
       setStopping(false)
     }

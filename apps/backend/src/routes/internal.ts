@@ -6,28 +6,33 @@ import { db } from '../db/index.js';
 import { videoEntities } from '../db/schema/index.js';
 
 const PREVIEW_SECRET = process.env.SCREENCAST_PREVIEW_SECRET || '';
+if (!PREVIEW_SECRET) {
+  console.warn('[internal] SCREENCAST_PREVIEW_SECRET is not set — live preview will not work');
+}
 
 export const internalRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.addContentTypeParser('image/jpeg', { parseAs: 'buffer' }, (req, body, done) => {
     done(null, body);
   });
-  fastify.addContentTypeParser('video/mp4', { parseAs: 'buffer', bodyLimit: 500 * 1024 * 1024 }, (req, body, done) => {
+
+  const videoLimit = 500 * 1024 * 1024;
+  fastify.addContentTypeParser('video/mp4', { parseAs: 'buffer', bodyLimit: videoLimit }, (req, body, done) => {
     done(null, body);
   });
-  fastify.addContentTypeParser('application/octet-stream', { parseAs: 'buffer', bodyLimit: 500 * 1024 * 1024 }, (req, body, done) => {
+  fastify.addContentTypeParser('video/webm', { parseAs: 'buffer', bodyLimit: videoLimit }, (req, body, done) => {
+    done(null, body);
+  });
+  fastify.addContentTypeParser('application/octet-stream', { parseAs: 'buffer', bodyLimit: videoLimit }, (req, body, done) => {
     done(null, body);
   });
 
   fastify.post<{ Params: { videoId: string } }>('/live-preview/:videoId', { logLevel: 'silent' }, async (request, reply) => {
     if (!PREVIEW_SECRET || request.headers['x-preview-token'] !== PREVIEW_SECRET) {
-      request.log.warn({ videoId: (request.params as { videoId: string }).videoId }, 'Live preview: 401 (bad/missing token)');
       return reply.status(401).send({ error: 'Unauthorized' });
     }
     const { videoId } = request.params;
     const body = request.body;
-    if (!body || !Buffer.isBuffer(body)) {
-      return reply.status(400).send({ error: 'Expected JPEG body' });
-    }
+    if (!body || !Buffer.isBuffer(body)) return reply.status(400).send({ error: 'Expected JPEG body' });
     setFrame(videoId, body);
     return reply.send({ ok: true });
   });
@@ -37,20 +42,16 @@ export const internalRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(401).send({ error: 'Unauthorized' });
     }
     const { videoId } = request.params;
-    const projectId = request.headers['x-project-id'] as string | undefined;
-    if (!projectId) {
-      return reply.status(400).send({ error: 'X-Project-Id header required' });
-    }
+    const projectId = request.headers['x-project-id'];
+    if (!projectId || typeof projectId !== 'string') return reply.status(400).send({ error: 'X-Project-Id required' });
     const body = request.body;
-    if (!body || !Buffer.isBuffer(body)) {
-      return reply.status(400).send({ error: 'Expected MP4 body' });
-    }
-    const filename = `${Date.now()}-${Math.random().toString(36).slice(2)}.mp4`;
+    if (!body || !Buffer.isBuffer(body)) return reply.status(400).send({ error: 'Expected video body' });
+    const ct = request.headers['content-type'] || 'video/webm';
+    const ext = ct.includes('mp4') ? '.mp4' : '.webm';
+    const filename = `${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`;
     const key = `projects/${projectId}/${filename}`;
-    await uploadToR2(key, body, 'video/mp4');
-    await db.update(videoEntities)
-      .set({ status: 'ready', sourceUrl: key, metadata: {} })
-      .where(eq(videoEntities.id, videoId));
+    await uploadToR2(key, body, ct.includes('mp4') ? 'video/mp4' : 'video/webm');
+    await db.update(videoEntities).set({ status: 'ready', sourceUrl: key, metadata: {} }).where(eq(videoEntities.id, videoId));
     return reply.send({ ok: true, key });
   });
 };

@@ -95,15 +95,20 @@ async function injectFitCSS(page: { evaluate: (fn: () => void) => Promise<void> 
   await page.evaluate(() => {
     const style = document.createElement('style');
     style.textContent = `
-      html, body { 
+      * { 
         margin: 0 !important; 
         padding: 0 !important; 
         overflow: hidden !important; 
+      }
+      html, body { 
         background: black !important;
         width: 100vw !important;
         height: 100vh !important;
+        position: fixed !important;
+        top: 0 !important;
+        left: 0 !important;
       } 
-      canvas, video, .game-container, [class*="game"], [class*="replay"], [class*="Replay"] { 
+      canvas, video, iframe, .game-container, [class*="game"], [class*="replay"], [class*="Replay"] { 
         position: fixed !important;
         top: 0 !important;
         left: 0 !important;
@@ -112,9 +117,17 @@ async function injectFitCSS(page: { evaluate: (fn: () => void) => Promise<void> 
         max-width: none !important;
         max-height: none !important;
         object-fit: fill !important; 
+        z-index: 999999 !important;
       }
     `;
     document.head.appendChild(style);
+    
+    // Prevent any scrolling attempts
+    window.scrollTo(0, 0);
+    window.addEventListener('scroll', (e) => {
+      window.scrollTo(0, 0);
+      e.preventDefault();
+    }, { passive: false });
   });
 }
 
@@ -249,19 +262,30 @@ async function runScreencastJob(jobData: ScreencastJobData): Promise<void> {
     const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || puppeteer.executablePath();
     // headless: 'new' = no visible window (macOS ignores --window-position). Set SCREENCAST_HEADLESS=false for visible window.
     const useHeadless = process.env.SCREENCAST_HEADLESS !== 'false';
-    const { width: vw0, height: vh0 } = { width: DEFAULT_VIEWPORT_WIDTH, height: DEFAULT_VIEWPORT_HEIGHT };
+    const vw = 1920;
+    const vh = 1080;
     
-    log(`Launch config: headless=${useHeadless}, BACKEND_URL=${BACKEND_URL}`);
+    log(`Launch config: headless=${useHeadless}, BACKEND_URL=${BACKEND_URL}, res=${vw}x${vh}@2x`);
 
     browser = await launch({
       headless: useHeadless,
       executablePath,
-      defaultViewport: { width: vw0, height: vh0, deviceScaleFactor: 2 },
-      startDelay: 800,
+      ignoreDefaultArgs: ['--enable-automation'],
+      defaultViewport: { width: vw, height: vh, deviceScaleFactor: 2 },
+      startDelay: 1000,
       args: [
         '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--autoplay-policy=no-user-gesture-required',
         '--allowlisted-extension-id=jjndjgheafjngoipoacpjgeicjeomjli',
-        `--window-size=${vw0},${vh0}`,
+        `--window-size=${vw},${vh}`,
+        '--force-device-scale-factor=2',
+        '--hide-scrollbars',
+        '--mute-audio',
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--disable-notifications',
+        '--disable-features=IsolateOrigins,site-per-process',
+        '--auto-accept-this-tab-capture',
+        '--kiosk', // Ultimate "no-UI" mode
         ...(useHeadless
           ? ['--headless', '--enable-audio-service', '--mute-audio=false']
           : [
@@ -274,20 +298,32 @@ async function runScreencastJob(jobData: ScreencastJobData): Promise<void> {
     });
     if (await isJobCancelled(videoId)) throw new JobCancelledError();
     const page = await browser.newPage();
-    await page.setViewport({ width: vw0, height: vh0, deviceScaleFactor: 2 });
+    // We already set defaultViewport in launch, no need to call it twice and cause jumps
+    
     if (await isJobCancelled(videoId)) throw new JobCancelledError();
-    await page.goto(finalUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+    await page.goto(finalUrl, { waitUntil: 'networkidle2', timeout: 45000 });
+    await page.bringToFront();
+    
     if (await isJobCancelled(videoId)) throw new JobCancelledError();
-    const { width: vw, height: vh } = await detectContentSize(page);
-    log(`Content size detected: ${vw}x${vh} (Retina/DPR=2)`);
-    await page.setViewport({ width: vw, height: vh, deviceScaleFactor: 2 });
     await injectFitCSS(page);
-    await new Promise((r) => setTimeout(r, 500));
+    
+    // Crucial: Wait 5 seconds for the layout and capture extension to stabilize
+    await new Promise((r) => setTimeout(r, 5000));
+    
     stopPreview = startLivePreview(page, videoId, log);
     if (await isJobCancelled(videoId)) throw new JobCancelledError();
-    const stream = await getStream(page, { audio: true, video: true, videoBitsPerSecond: 2_500_000, audioBitsPerSecond: 128_000 });
+    
+    const stream = await getStream(page, { 
+      audio: true, 
+      video: true, 
+      videoBitsPerSecond: 8_000_000, 
+      audioBitsPerSecond: 128_000,
+      // Remove videoConstraints to let the browser use native tab resolution.
+      // Forcing resolution here with DPR=2 often causes cropping/offset issues.
+    });
     const file = createWriteStream(webmPath);
     stream.pipe(file);
+    
     await clickPlayButton(page, videoId, playSelectors, vw, vh, log);
     await new Promise((r) => setTimeout(r, 1000));
     log('Recording...');

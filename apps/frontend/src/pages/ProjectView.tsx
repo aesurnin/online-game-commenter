@@ -871,6 +871,7 @@ export function ProjectView({
                 <video
                   src={selectedVideo!.streamUrl ?? selectedVideo!.playUrl ?? selectedVideo!.sourceUrl}
                   controls
+                  preload="metadata"
                   className="w-full h-full object-contain"
                 />
               </div>

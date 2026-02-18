@@ -3,7 +3,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import type { WorkflowContext, WorkflowModule, ModuleRunResult } from '../types.js';
 
-async function getVideoDimensions(inputPath: string): Promise<{ width: number; height: number }> {
+async function getVideoDimensions(inputPath: string, signal?: AbortSignal): Promise<{ width: number; height: number }> {
   return new Promise((resolve, reject) => {
     const proc = spawn('ffprobe', [
       '-v', 'error',
@@ -12,6 +12,18 @@ async function getVideoDimensions(inputPath: string): Promise<{ width: number; h
       '-of', 'csv=p=0',
       '-i', inputPath,
     ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+    if (signal) {
+      if (signal.aborted) {
+        proc.kill();
+        return reject(new Error('Aborted'));
+      }
+      signal.addEventListener('abort', () => {
+        proc.kill();
+        reject(new Error('Aborted'));
+      }, { once: true });
+    }
+
     let out = '';
     proc.stdout?.on('data', (c) => { out += c.toString(); });
     proc.on('error', reject);
@@ -73,7 +85,7 @@ export class VideoCropModule implements WorkflowModule {
     let width: number;
     let height: number;
     try {
-      const dims = await getVideoDimensions(inputPath);
+      const dims = await getVideoDimensions(inputPath, context.signal);
       width = dims.width;
       height = dims.height;
     } catch (e) {
@@ -110,6 +122,18 @@ export class VideoCropModule implements WorkflowModule {
 
     const ok = await new Promise<boolean>((resolve) => {
       const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+
+      if (context.signal) {
+        if (context.signal.aborted) {
+          proc.kill();
+          return resolve(false);
+        }
+        context.signal.addEventListener('abort', () => {
+          proc.kill();
+          resolve(false);
+        }, { once: true });
+      }
+
       proc.on('error', (err) => {
         onLog?.(`Spawn error: ${err}`);
         resolve(false);

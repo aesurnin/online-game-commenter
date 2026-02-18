@@ -101,13 +101,21 @@ const workflowsRoutes: FastifyPluginAsync = async (fastify) => {
     let workflow = bodyWorkflow ?? (await workflowService.getWorkflow(id));
     if (!workflow) return reply.status(404).send({ error: 'Workflow not found' });
 
-    const { id: jobId } = await addWorkflowJob({
-      projectId,
-      videoId,
-      workflowId: id,
-      workflow,
-      sourceVideoKey: sourceKey,
-    });
+    let jobId: string;
+    try {
+      const result = await addWorkflowJob({
+        projectId,
+        videoId,
+        workflowId: id,
+        workflow,
+        sourceVideoKey: sourceKey,
+      });
+      jobId = result.id;
+      request.log.info({ jobId }, 'Workflow job added to queue');
+    } catch (err) {
+      request.log.error(err, 'Failed to add workflow job to queue (Redis?)');
+      return reply.status(500).send({ error: 'Failed to enqueue job. Is Redis running?' });
+    }
 
     createJob({
       jobId,
@@ -126,6 +134,7 @@ const workflowsRoutes: FastifyPluginAsync = async (fastify) => {
     Params: { id: string; stepIndex: string };
     Body: { projectId: string; videoId: string; workflow?: { name: string; modules: unknown[] } };
   }>('/:id/step/:stepIndex', async (request, reply) => {
+    request.log.info({ workflowId: request.params.id, stepIndex: request.params.stepIndex }, 'Workflow step run requested');
     const { id, stepIndex: stepIndexStr } = request.params;
     const stepIndex = parseInt(stepIndexStr, 10);
     if (isNaN(stepIndex) || stepIndex < 0) {
@@ -162,14 +171,22 @@ const workflowsRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(400).send({ error: 'Step index out of range' });
     }
 
-    const { id: jobId } = await addWorkflowJob({
-      projectId,
-      videoId,
-      workflowId: id,
-      workflow,
-      stepIndex,
-      sourceVideoKey: sourceKey,
-    });
+    let jobId: string;
+    try {
+      const result = await addWorkflowJob({
+        projectId,
+        videoId,
+        workflowId: id,
+        workflow,
+        stepIndex,
+        sourceVideoKey: sourceKey,
+      });
+      jobId = result.id;
+      request.log.info({ jobId }, 'Workflow job added to queue');
+    } catch (err) {
+      request.log.error(err, 'Failed to add workflow job to queue (Redis?)');
+      return reply.status(500).send({ error: 'Failed to enqueue job. Is Redis running?' });
+    }
 
     createJob({
       jobId,

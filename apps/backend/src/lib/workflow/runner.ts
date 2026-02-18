@@ -197,6 +197,8 @@ export interface RunOptions {
   onLog?: (message: string) => void;
   /** Called periodically to check if execution should be aborted */
   onCheckCancel?: () => boolean;
+  /** Optional: abort signal to stop long-running operations */
+  signal?: AbortSignal;
 }
 
 export interface RunResult {
@@ -221,7 +223,7 @@ export async function downloadVideoToTemp(
 }
 
 export async function runWorkflow(options: RunOptions): Promise<RunResult> {
-  const { projectId, videoId, sourceVideoKey, workflow, stepIndex, previousContext, onProgress, onLog, onCheckCancel } = options;
+  const { projectId, videoId, sourceVideoKey, workflow, stepIndex, previousContext, onProgress, onLog, onCheckCancel, signal } = options;
   const tempDir = previousContext?.tempDir ?? await fs.mkdtemp(path.join(os.tmpdir(), 'workflow-'));
   const modules = workflow.modules;
 
@@ -262,6 +264,7 @@ export async function runWorkflow(options: RunOptions): Promise<RunResult> {
     tempDir,
     onProgress,
     onLog,
+    signal,
   };
 
   const cacheBase = getWorkflowCacheBase();
@@ -298,6 +301,14 @@ export async function runWorkflow(options: RunOptions): Promise<RunResult> {
       context.currentVideoPath = variables[inputVar];
     } else if (i === 0) {
       context.currentVideoPath = variables.source;
+    }
+
+    context.inputPaths = {};
+    if (def.inputs) {
+      for (const [slotKey, varName] of Object.entries(def.inputs)) {
+        const p = variables[varName];
+        if (p && typeof p === 'string') context.inputPaths[slotKey] = p;
+      }
     }
 
     const stepNum = i + 1;

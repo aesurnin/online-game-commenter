@@ -82,3 +82,14 @@ export async function addWorkflowJob(data: WorkflowJobData): Promise<{ id: strin
   return { id: job.id! };
 }
 
+/** Check if Redis is reachable. Used at startup and for health endpoint. */
+export async function checkRedisConnection(): Promise<{ ok: boolean; error?: string }> {
+  try {
+    await workflowQueue.getJobCounts();
+    return { ok: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: msg };
+  }
+}
+

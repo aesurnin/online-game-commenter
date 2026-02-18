@@ -55,6 +55,7 @@ import { internalRoutes } from './routes/internal.js';
 import envRoutes from './routes/env.js';
 import { startWorkflowWorker } from './workers/workflow.js';
 import { loadAppEnvIntoProcess } from './lib/env-store.js';
+import { checkRedisConnection } from './lib/queue.js';
 server.register(authRoutes, { prefix: '/auth' });
 server.register(projectsRoutes, { prefix: '/projects' });
 server.register(providersRoutes, { prefix: '/providers' });
@@ -65,6 +66,14 @@ server.register(envRoutes, { prefix: '/env' });
 
 server.get('/ping', async (request, reply) => {
   return { pong: 'it works!' };
+});
+
+server.get('/health', async (request, reply) => {
+  const redis = await checkRedisConnection();
+  return {
+    redis: redis.ok ? 'ok' : 'error',
+    redisError: redis.error,
+  };
 });
 
 server.get('/config', async (request, reply) => {
@@ -92,6 +101,15 @@ const start = async () => {
     await seedAuthUsers();
     await seedProviderTemplates();
     await loadAppEnvIntoProcess();
+
+    const redis = await checkRedisConnection();
+    if (!redis.ok) {
+      console.error('[Startup] Redis unreachable:', redis.error);
+      console.error('[Startup] Workflow jobs will fail. Ensure Redis is running (docker-compose up redis)');
+    } else {
+      console.log('[Startup] Redis OK');
+    }
+
     await server.listen({ port: 3000, host: '0.0.0.0' });
     console.log(`Server listening on ${server.server.address()}`);
     startWorkflowWorker();

@@ -1,6 +1,6 @@
 import { FastifyPluginAsync } from 'fastify';
 import { eq, inArray } from 'drizzle-orm';
-import { screencastQueue, workflowQueue } from '../lib/queue.js';
+import { screencastQueue, workflowQueue, checkRedisConnection } from '../lib/queue.js';
 import { db } from '../db/index.js';
 import { projects, videoEntities } from '../db/schema/index.js';
 import { getJob as getWorkflowJob, requestCancel } from '../lib/workflow-job-store.js';
@@ -73,6 +73,21 @@ const queueRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   fastify.get('/status', async (request, reply) => {
+    const redis = await checkRedisConnection();
+    if (!redis.ok) {
+      return reply.send({
+        redis: 'error',
+        redisError: redis.error,
+        counts: { waiting: 0, active: 0, completed: 0, failed: 0, delayed: 0 },
+        waiting: [],
+        active: [],
+        failed: [],
+        completed: [],
+        strategy: process.env.RECORDING_STRATEGY || 'puppeteer-stream',
+        durationLimit: parseInt(process.env.SCREENCAST_MAX_DURATION || '600', 10),
+      });
+    }
+
     const [
       screencastWaiting,
       screencastActive,
@@ -165,6 +180,7 @@ const queueRoutes: FastifyPluginAsync = async (fastify) => {
 
     const durationLimit = parseInt(process.env.SCREENCAST_MAX_DURATION || '600', 10);
     return reply.send({
+      redis: 'ok',
       counts: {
         waiting: waiting.length,
         active: active.length,

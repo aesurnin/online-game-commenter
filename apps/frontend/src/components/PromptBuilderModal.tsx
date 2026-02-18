@@ -107,7 +107,7 @@ export function PromptBuilderModal({
             </p>
             <div className="flex flex-wrap gap-2">
               {availableVariables.length === 0 ? (
-                <span className="text-xs text-muted-foreground">No variables from previous steps (e.g. source, text_1).</span>
+                <span className="text-xs text-muted-foreground">No text variables from previous steps (e.g. text_1).</span>
               ) : (
                 availableVariables.map((name) => (
                   <Button

@@ -466,8 +466,9 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
         const ct = obj.contentType ?? '';
         const isVideo = ct.startsWith('video/');
         const isImage = ct.startsWith('image/');
+        const isText = ct.startsWith('text/') || /\.(txt|md)$/i.test(obj.key);
         let previewUrl: string | undefined;
-        if (isVideo || isImage) {
+        if (isVideo || isImage || isText) {
           try {
             previewUrl = await getPresignedUrl(obj.key, 3600);
           } catch {

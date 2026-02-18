@@ -73,6 +73,18 @@ export class VideoCompressorModule implements WorkflowModule {
 
     const ok = await new Promise<boolean>((resolve) => {
       const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+
+      if (context.signal) {
+        if (context.signal.aborted) {
+          proc.kill();
+          return resolve(false);
+        }
+        context.signal.addEventListener('abort', () => {
+          proc.kill();
+          resolve(false);
+        }, { once: true });
+      }
+
       proc.on('error', () => resolve(false));
       proc.on('close', (code) => resolve(code === 0));
 

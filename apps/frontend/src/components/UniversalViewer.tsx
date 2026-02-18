@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect } from "react"
+import ReactMarkdown from "react-markdown"
 import { Button } from "@/components/ui/button"
 import type { PreviewAssetState, PreviewAssetMetadata } from "@/contexts/PreviewVideoContext"
 
@@ -111,9 +112,16 @@ function isTextContentType(contentType: string, url: string): boolean {
   return u.endsWith(".txt") || u.endsWith(".md")
 }
 
+function isMarkdownContentType(contentType: string, url: string): boolean {
+  if (contentType === "text/markdown") return true
+  const u = url.split("?")[0].toLowerCase()
+  return u.endsWith(".md")
+}
+
 function TextContentPreview({ url, contentType }: { url: string; contentType: string }) {
   const [text, setText] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const isMarkdown = isMarkdownContentType(contentType, url)
 
   useEffect(() => {
     let cancelled = false
@@ -149,10 +157,22 @@ function TextContentPreview({ url, contentType }: { url: string; contentType: st
     )
   }
   return (
-    <div className="p-4 h-full min-h-[200px] max-h-[70vh] overflow-auto bg-background text-foreground">
-      <pre className="text-xs font-mono whitespace-pre-wrap break-words m-0">
-        {text}
-      </pre>
+    <div className="p-4 flex-1 min-h-0 overflow-auto bg-background text-foreground">
+      {isMarkdown ? (
+        <article className="prose prose-sm dark:prose-invert max-w-none">
+          <ReactMarkdown
+            components={{
+              pre: ({ children }) => <pre className="whitespace-pre-wrap break-words">{children}</pre>,
+            }}
+          >
+            {text}
+          </ReactMarkdown>
+        </article>
+      ) : (
+        <pre className="text-xs font-mono whitespace-pre-wrap break-words m-0">
+          {text}
+        </pre>
+      )}
     </div>
   )
 }
@@ -183,6 +203,31 @@ export function UniversalViewer({ asset, onClose }: UniversalViewerProps) {
   const mergedMetadata = { ...asset.metadata, ...mediaMetadata }
   const fullUrl = getFullUrl(asset.url)
 
+  const header = (
+    <div className="flex items-center justify-between p-3 shrink-0 bg-muted/30 rounded-t-lg">
+      <span className="text-sm font-medium truncate">
+        {asset.label ?? "Preview"}
+      </span>
+      <Button variant="secondary" size="sm" onClick={onClose}>
+        Back to original
+      </Button>
+    </div>
+  )
+
+  if (isText) {
+    return (
+      <div className="w-full max-w-4xl space-y-3">
+        <div className="rounded-lg overflow-hidden shadow-lg border bg-background flex flex-col max-h-[75vh]">
+          {header}
+          <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+            <TextContentPreview url={asset.url} contentType={contentType || "text/plain"} />
+          </div>
+        </div>
+        <MetadataPanel metadata={mergedMetadata} openUrl={fullUrl} />
+      </div>
+    )
+  }
+
   return (
     <div className="w-full max-w-4xl space-y-3">
       <div className="relative bg-black rounded-lg overflow-hidden shadow-lg">
@@ -211,10 +256,7 @@ export function UniversalViewer({ asset, onClose }: UniversalViewerProps) {
               onLoad={handleImageLoad}
             />
           )}
-          {isText && (
-            <TextContentPreview url={asset.url} contentType={contentType || "text/plain"} />
-          )}
-          {!isVideo && !isImage && !isText && (
+          {!isVideo && !isImage && (
             <div className="p-8 text-center text-muted-foreground">
               <p className="text-sm">Preview not available for this file type</p>
               <p className="text-xs mt-1">{contentType || "Unknown type"}</p>

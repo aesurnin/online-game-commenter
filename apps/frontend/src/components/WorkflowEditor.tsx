@@ -19,6 +19,8 @@ import {
   Eye,
   Crop as CropIcon,
   Pencil,
+  PlusCircle,
+  MinusCircle,
 } from "lucide-react"
 import { useSelectedVideo } from "@/contexts/SelectedVideoContext"
 import { useLogs } from "@/contexts/LogsContext"
@@ -48,6 +50,7 @@ type ModuleMeta = {
   quickParams?: string[]
   inputSlots?: ModuleSlotDef[]
   outputSlots?: ModuleSlotDef[]
+  allowDynamicInputs?: boolean
   paramsSchema?: Array<{
     key: string
     label: string
@@ -102,7 +105,18 @@ function loadFromCache(projectId: string, videoId: string): Partial<VideoWorkflo
   try {
     const raw = localStorage.getItem(getCacheKey(projectId, videoId))
     if (!raw) return null
-    return JSON.parse(raw) as Partial<VideoWorkflowState>
+    const parsed = JSON.parse(raw) as Partial<VideoWorkflowState>
+    if (parsed.stepStatuses) {
+      const sanitized: Record<number, StepStatus> = {}
+      for (const [k, v] of Object.entries(parsed.stepStatuses)) {
+        if (v === "running") continue
+        sanitized[Number(k)] = v as StepStatus
+      }
+      parsed.stepStatuses = sanitized
+    }
+    parsed.activeJobId = null
+    parsed.runningAll = false
+    return parsed
   } catch {
     return null
   }
@@ -110,10 +124,14 @@ function loadFromCache(projectId: string, videoId: string): Partial<VideoWorkflo
 
 function saveToCache(projectId: string, videoId: string, state: VideoWorkflowState) {
   try {
+    const sanitizedStatuses: Record<number, StepStatus> = {}
+    for (const [k, v] of Object.entries(state.stepStatuses)) {
+      if (v !== "running") sanitizedStatuses[Number(k)] = v
+    }
     const toSave = {
       currentWorkflowId: state.currentWorkflowId,
       workflow: state.workflow,
-      stepStatuses: state.stepStatuses,
+      stepStatuses: sanitizedStatuses,
       stepOutputUrls: state.stepOutputUrls,
       stepOutputContentTypes: state.stepOutputContentTypes,
       jobLogs: state.jobLogs.slice(-MAX_CACHED_LOGS),
@@ -257,7 +275,21 @@ export function WorkflowEditor() {
       if (!jobVideoId) return
       try {
         const r = await fetch(`/api/workflows/jobs/${jobId}`, { credentials: "include" })
-        if (!r.ok) return
+        if (!r.ok) {
+          if (r.status === 404) {
+            activeJobVideoIdRef.current = null
+            setStateByVideo((prev) => {
+              const current = prev[jobVideoId] ?? defaultVideoState()
+              const nextStatuses = { ...current.stepStatuses }
+              for (const k of Object.keys(nextStatuses)) {
+                if (nextStatuses[Number(k)] === "running") nextStatuses[Number(k)] = "pending"
+              }
+              return { ...prev, [jobVideoId]: { ...current, activeJobId: null, runningAll: false, stepStatuses: nextStatuses } }
+            })
+            addLog("Job no longer exists (server restarted?)", "warn", jobVideoId)
+          }
+          return
+        }
         const job = await r.json()
         setStateByVideo((prev) => {
           const current = prev[jobVideoId] ?? defaultVideoState()
@@ -519,6 +551,21 @@ export function WorkflowEditor() {
     return Array.from(vars).sort()
   }
 
+  /** Only variables that hold text (from steps with text output slots). Use for prompt placeholders. */
+  const getAvailableTextVariablesForModule = (moduleIndex: number): string[] => {
+    const vars = new Set<string>()
+    for (let i = 0; i < moduleIndex; i++) {
+      const m = workflow?.modules[i]
+      const meta = moduleTypes.find((mt) => mt.type === m?.type)
+      if (!m?.outputs || !meta?.outputSlots) continue
+      for (const [slotKey, varName] of Object.entries(m.outputs)) {
+        const slot = meta.outputSlots.find((s) => s.key === slotKey)
+        if (slot?.kind === "text") vars.add(varName)
+      }
+    }
+    return Array.from(vars).sort()
+  }
+
   const runStep = async (stepIndex: number) => {
     if (!projectId || !videoId || !currentWorkflowId || !workflow) {
       addLog("Select a project, video and workflow first", "warn", videoId ?? undefined)
@@ -723,7 +770,25 @@ export function WorkflowEditor() {
               <div className="rounded-lg border bg-muted/40 p-3 space-y-2.5 shadow-sm">
                 <div className="flex items-center justify-between text-xs">
                   <span className="font-medium">{jobMessage || "Running..."}</span>
-                  {activeJobId && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />}
+                  <div className="flex items-center gap-2">
+                    {activeJobId && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-6 text-xs text-destructive hover:text-destructive hover:bg-destructive/10"
+                        onClick={async () => {
+                          try {
+                            const r = await fetch(`/api/queue/jobs/${activeJobId}/kill`, { method: "POST", credentials: "include" })
+                            if (r.ok) addLog("Cancellation requested", "info", videoId ?? undefined)
+                          } catch { addLog("Cancel request failed", "error", videoId ?? undefined) }
+                        }}
+                      >
+                        Cancel
+                      </Button>
+                    )}
+                    {activeJobId && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />}
+                  </div>
                 </div>
                 <div className="h-2 bg-muted rounded-full overflow-hidden">
                   <div
@@ -811,7 +876,7 @@ export function WorkflowEditor() {
             onClose={() => setOpenPromptBuilder(null)}
             value={currentValue}
             onChange={(v) => updateModuleParams(index, { ...params, [paramKey]: v })}
-            availableVariables={getAvailableVariablesForModule(index)}
+            availableVariables={getAvailableTextVariablesForModule(index)}
             label={paramLabel}
           />
         )
@@ -1022,28 +1087,82 @@ function ModuleBlock({
       </div>
       {expanded && (meta?.inputSlots?.length ?? 0) > 0 && (
         <div className="space-y-2 mb-3 pt-2 border-t">
-          <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Inputs</span>
-          {meta!.inputSlots!.map((slot) => (
-            <div key={slot.key} className="flex items-center gap-2">
-              <label className="text-xs text-muted-foreground w-20 shrink-0">{slot.label}</label>
-              <select
-                className="h-7 rounded-md border border-input bg-background px-2 text-xs flex-1"
-                value={
-                  module.inputs?.[slot.key] ??
-                  (slot.kind === "video" ? (index === 0 ? "source" : getAvailableVariables().pop() ?? "source") : "")
-                }
-                onChange={(e) =>
-                  onInputsChange({ ...(module.inputs ?? {}), [slot.key]: e.target.value })
-                }
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Inputs</span>
+            {meta?.allowDynamicInputs && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-5 w-5 text-primary hover:text-primary hover:bg-primary/10"
+                onClick={() => {
+                  const currentKeys = Object.keys(module.inputs ?? {}).filter(k => k.startsWith("media_"))
+                  const nextIdx = currentKeys.length > 0 
+                    ? Math.max(...currentKeys.map(k => parseInt(k.split("_")[1]))) + 1 
+                    : 1
+                  onInputsChange({ ...(module.inputs ?? {}), [`media_${nextIdx}`]: "" })
+                }}
+                title="Add media input"
               >
-                {getAvailableVariables().map((v) => (
-                  <option key={v} value={v}>
-                    {v}
-                  </option>
-                ))}
-              </select>
-            </div>
-          ))}
+                <PlusCircle className="h-3.5 w-3.5" />
+              </Button>
+            )}
+          </div>
+          {(() => {
+            const slots = [...(meta?.inputSlots ?? [])]
+            if (meta?.allowDynamicInputs) {
+              const extraKeys = Object.keys(module.inputs ?? {})
+                .filter(k => k.startsWith("media_") && !slots.some(s => s.key === k))
+                .sort((a, b) => parseInt(a.split("_")[1]) - parseInt(b.split("_")[1]))
+              for (const k of extraKeys) {
+                const idx = parseInt(k.split("_")[1])
+                slots.push({ key: k, label: `Media ${idx + 1}`, kind: "file" })
+              }
+            }
+
+            return slots.map((slot) => (
+              <div key={slot.key} className="flex items-center gap-2">
+                <label className="text-xs text-muted-foreground w-20 shrink-0">{slot.label}</label>
+                <div className="flex-1 flex items-center gap-1.5">
+                  <select
+                    className="h-7 rounded-md border border-input bg-background px-2 text-xs flex-1"
+                    value={
+                      module.inputs?.[slot.key] ??
+                      (slot.kind === "video" ? (index === 0 ? "source" : getAvailableVariables().pop() ?? "source") : "")
+                    }
+                    onChange={(e) =>
+                      onInputsChange({ ...(module.inputs ?? {}), [slot.key]: e.target.value })
+                    }
+                  >
+                    {slot.kind === "file" && (
+                      <option value="">— None —</option>
+                    )}
+                    {getAvailableVariables().map((v) => (
+                      <option key={v} value={v}>
+                        {v}
+                      </option>
+                    ))}
+                  </select>
+                  {meta?.allowDynamicInputs && slot.key.startsWith("media_") && slots.filter(s => s.key.startsWith("media_")).length > 1 && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6 text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+                      onClick={() => {
+                        const nextInputs = { ...(module.inputs ?? {}) }
+                        delete nextInputs[slot.key]
+                        onInputsChange(nextInputs)
+                      }}
+                      title="Remove input"
+                    >
+                      <MinusCircle className="h-3.5 w-3.5" />
+                    </Button>
+                  )}
+                </div>
+              </div>
+            ))
+          })()}
         </div>
       )}
       {expanded && (meta?.outputSlots?.length ?? 0) > 0 && (

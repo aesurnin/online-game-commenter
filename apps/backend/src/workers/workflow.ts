@@ -39,6 +39,14 @@ async function processWorkflowJob(job: Job<WorkflowJobData>) {
     stepIndex,
   });
 
+  const abortController = new AbortController();
+  const cancelCheckInterval = setInterval(() => {
+    if (isCancelRequested(jobId)) {
+      abortController.abort();
+      clearInterval(cancelCheckInterval);
+    }
+  }, 1000);
+
   try {
     const result = await runWorkflow({
       projectId,
@@ -52,8 +60,10 @@ async function processWorkflowJob(job: Job<WorkflowJobData>) {
       },
       onLog: (msg) => appendJobLog(jobId, msg),
       onCheckCancel: () => isCancelRequested(jobId),
+      signal: abortController.signal,
     });
 
+    clearInterval(cancelCheckInterval);
     clearCancelRequest(jobId);
 
     if (!result.success) {
@@ -91,6 +101,7 @@ async function processWorkflowJob(job: Job<WorkflowJobData>) {
       stepResults: result.stepResults,
     });
   } catch (err) {
+    clearInterval(cancelCheckInterval);
     clearCancelRequest(jobId);
     const error = err instanceof Error ? err.message : String(err);
     if (!state.error) {

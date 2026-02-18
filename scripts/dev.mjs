@@ -47,15 +47,15 @@ function tcpConnect(host, port) {
   });
 }
 
-async function waitForRedis(maxAttempts = 30) {
+async function waitForPort(port, label, maxAttempts = 60) {
   for (let i = 0; i < maxAttempts; i++) {
-    if (await tcpConnect('127.0.0.1', 6379)) {
-      console.log('Redis is ready.');
+    if (await tcpConnect('127.0.0.1', port)) {
+      console.log(`${label} is ready.`);
       return;
     }
     await new Promise((r) => setTimeout(r, 500));
   }
-  throw new Error('Redis did not become ready in time.');
+  throw new Error(`${label} did not become ready in time.`);
 }
 
 async function main() {
@@ -80,7 +80,7 @@ async function main() {
   }
 
   console.log('Waiting for Redis...');
-  await waitForRedis();
+  await waitForPort(6379, 'Redis');
 
   console.log('Docker services:');
   await run('docker-compose', ['ps']);
@@ -88,19 +88,45 @@ async function main() {
   console.log('Applying DB schema...');
   await run('npm', ['run', 'db:push']);
 
+  let backendProc = null;
+  const killAll = () => {
+    if (backendProc?.pid) {
+      try {
+        process.kill(backendProc.pid, 'SIGTERM');
+      } catch (_) {}
+    }
+  };
+  process.on('SIGINT', killAll);
+  process.on('SIGTERM', killAll);
+
   if (useStreamWorker) {
-    console.log('Starting backend, frontend, and worker...');
+    console.log('Starting backend first (frontend will wait for it)...');
     const workerEnv = [
       'BACKEND_URL=http://localhost:3000',
       env.SCREENCAST_PREVIEW_SECRET ? `SCREENCAST_PREVIEW_SECRET=${env.SCREENCAST_PREVIEW_SECRET}` : '',
     ].filter(Boolean).join(' ');
+    backendProc = spawn('npm', ['run', 'dev:backend'], {
+      stdio: 'inherit',
+      cwd: rootDir,
+      shell: true,
+      env: process.env,
+    });
+    await waitForPort(3000, 'Backend');
     await run(
-      `npx concurrently -n backend,frontend,worker -c blue,green,magenta "npm run dev:backend" "npm run dev:frontend" "${workerEnv} npm run worker"`,
+      `npx concurrently -n frontend,worker -c green,magenta "npm run dev:frontend" "${workerEnv} npm run worker"`,
       []
     );
   } else {
-    console.log('Starting backend and frontend...');
-    await run('npx concurrently -n backend,frontend -c blue,green "npm run dev:backend" "npm run dev:frontend"', []);
+    console.log('Starting backend first...');
+    backendProc = spawn('npm', ['run', 'dev:backend'], {
+      stdio: 'inherit',
+      cwd: rootDir,
+      shell: true,
+      env: process.env,
+    });
+    await waitForPort(3000, 'Backend');
+    console.log('Starting frontend...');
+    await run('npm', ['run', 'dev:frontend']);
   }
 }
 

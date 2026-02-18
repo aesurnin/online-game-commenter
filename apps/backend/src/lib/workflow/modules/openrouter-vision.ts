@@ -44,7 +44,7 @@ async function resolvePromptPlaceholders(
 }
 
 /** Extract up to N frames from video at even intervals, return base64 JPEG buffers. */
-async function extractFrames(videoPath: string, count: number, durationSec: number): Promise<string[]> {
+async function extractFrames(videoPath: string, count: number, durationSec: number, signal?: AbortSignal): Promise<string[]> {
   const outDir = path.dirname(videoPath);
   const prefix = path.join(outDir, `frame_${Date.now()}_`);
   const pattern = `${prefix}%03d.jpg`;
@@ -63,6 +63,18 @@ async function extractFrames(videoPath: string, count: number, durationSec: numb
       ],
       { stdio: ['ignore', 'pipe', 'pipe'] }
     );
+    
+    if (signal) {
+      if (signal.aborted) {
+        proc.kill();
+        return reject(new Error('Aborted'));
+      }
+      signal.addEventListener('abort', () => {
+        proc.kill();
+        reject(new Error('Aborted'));
+      }, { once: true });
+    }
+
     proc.on('error', reject);
     proc.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}`))));
   });
@@ -83,13 +95,25 @@ async function extractFrames(videoPath: string, count: number, durationSec: numb
 }
 
 /** Get video duration in seconds using ffprobe. */
-async function getVideoDuration(videoPath: string): Promise<number> {
+async function getVideoDuration(videoPath: string, signal?: AbortSignal): Promise<number> {
   return new Promise((resolve, reject) => {
     const proc = spawn(
       'ffprobe',
       ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', '-i', videoPath],
       { stdio: ['ignore', 'pipe', 'pipe'] }
     );
+
+    if (signal) {
+      if (signal.aborted) {
+        proc.kill();
+        return reject(new Error('Aborted'));
+      }
+      signal.addEventListener('abort', () => {
+        proc.kill();
+        reject(new Error('Aborted'));
+      }, { once: true });
+    }
+
     let out = '';
     proc.stdout?.on('data', (c) => { out += c.toString(); });
     proc.on('error', reject);
@@ -101,19 +125,41 @@ async function getVideoDuration(videoPath: string): Promise<number> {
   });
 }
 
+const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp']);
+const IMAGE_MIME: Record<string, string> = {
+  '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
+  '.gif': 'image/gif', '.webp': 'image/webp',
+};
+
+/** Read image file to base64, or extract one frame from video. Returns data URL suffix (mime;base64,data). */
+async function readImageOrVideoFrame(filePath: string, signal?: AbortSignal): Promise<{ url: string }> {
+  const ext = path.extname(filePath).toLowerCase();
+  if (IMAGE_EXT.has(ext)) {
+    const buf = await fs.readFile(filePath);
+    const mime = IMAGE_MIME[ext] ?? 'image/jpeg';
+    return { url: `data:${mime};base64,${buf.toString('base64')}` };
+  }
+  const oneFrame = await extractFrames(filePath, 1, 1, signal);
+  if (oneFrame.length === 0) throw new Error(`Could not extract frame from ${filePath}`);
+  return { url: `data:image/jpeg;base64,${oneFrame[0]}` };
+}
+
 export const openrouterVisionMeta = {
   type: 'llm.openrouter.vision',
-  label: 'OpenRouter Vision (Video + Prompt)',
-  description: 'Send video frames and a prompt to OpenRouter; returns text. Prompt is stored in the workflow.',
+  label: 'OpenRouter Vision (Multimodal)',
+  description: 'Send multiple videos, images, and a prompt to OpenRouter; returns text.',
   category: 'LLM',
   quickParams: ['model', 'prompt'],
-  inputSlots: [{ key: 'video', label: 'Video', kind: 'video' as const }],
+  inputSlots: [
+    { key: 'media_0', label: 'Media 1', kind: 'file' as const },
+  ],
+  // Custom flag for UI to show +/- buttons
+  allowDynamicInputs: true,
   outputSlots: [{ key: 'text', label: 'Text', kind: 'text' as const }],
   paramsSchema: [
     { key: 'prompt', label: 'Prompt', type: 'prompt' as const, default: 'Describe what happens in this video.' },
     { key: 'apiKeyEnvVar', label: 'API key (env var name)', type: 'string' as const, default: 'OPENROUTER_API_KEY' },
-    { key: 'model', label: 'Model (e.g. openai/gpt-4o)', type: 'string' as const, default: 'openai/gpt-4o' },
-    { key: 'maxFrames', label: 'Max frames to send', type: 'number' as const, default: 8, min: 1, max: 20 },
+    { key: 'model', label: 'Model', type: 'string' as const, default: 'openai/gpt-4o' },
     { key: 'maxTokens', label: 'Max tokens', type: 'number' as const, default: 1024, min: 1, max: 32000 },
     { key: 'temperature', label: 'Temperature', type: 'number' as const, default: 0.7, min: 0, max: 2 },
     { key: 'outputFormat', label: 'Output file format', type: 'string' as const, default: 'txt', options: [{ value: 'txt', label: 'Plain text (.txt)' }, { value: 'md', label: 'Markdown (.md)' }] },
@@ -125,66 +171,115 @@ export class OpenRouterVisionModule implements WorkflowModule {
 
   async run(context: WorkflowContext, params: Record<string, unknown>): Promise<ModuleRunResult> {
     const { onProgress, onLog } = context;
-    const inputPath = context.currentVideoPath;
-    const promptTemplate = String(params.prompt ?? 'Describe what happens in this video.').trim();
+    const inputPaths = context.inputPaths ?? {};
+    
+    const promptTemplate = String(params.prompt ?? 'Describe the provided media.').trim();
+    onLog?.('Resolving prompt placeholders...');
     const prompt = await resolvePromptPlaceholders(promptTemplate, context.variables);
+    
     const apiKeyEnvVar = String(params.apiKeyEnvVar ?? 'OPENROUTER_API_KEY').trim();
     const model = String(params.model ?? 'openai/gpt-4o').trim();
-    const maxFrames = Math.max(1, Math.min(20, Number(params.maxFrames) ?? 8));
     const maxTokens = Math.max(1, Math.min(32000, Number(params.maxTokens) ?? 1024));
     const temperature = Math.max(0, Math.min(2, Number(params.temperature) ?? 0.7));
     const outputFormat = String(params.outputFormat ?? 'txt').trim() === 'md' ? 'md' : 'txt';
 
     const apiKey = process.env[apiKeyEnvVar];
     if (!apiKey) {
+      onLog?.(`Error: API key env var "${apiKeyEnvVar}" is not set.`);
       return { success: false, error: `Env variable "${apiKeyEnvVar}" is not set. Add it in Env Manager.` };
     }
 
-    try {
-      await fs.access(inputPath);
-    } catch {
-      return { success: false, error: `Input video not found: ${inputPath}` };
+    const isGemini = model.toLowerCase().includes('gemini');
+    onLog?.(`Target model: ${model} (Gemini native support: ${isGemini})`);
+
+    const content: Array<
+      | { type: 'text'; text: string }
+      | { type: 'image_url'; image_url: { url: string } }
+      | { type: 'video_url'; video_url: { url: string } }
+    > = [
+      { type: 'text', text: prompt },
+    ];
+
+    // Collect all media inputs (media_0, media_1, etc.)
+    const mediaKeys = Object.keys(inputPaths).filter(k => k.startsWith('media_')).sort();
+    onLog?.(`Found ${mediaKeys.length} media input(s) to process.`);
+
+    for (const [idx, key] of mediaKeys.entries()) {
+      const filePath = inputPaths[key];
+      if (!filePath) continue;
+
+      try {
+        await fs.access(filePath);
+      } catch {
+        onLog?.(`Warning: File for input "${key}" not found: ${filePath}`);
+        continue;
+      }
+
+      const ext = path.extname(filePath).toLowerCase();
+      const isVideo = ['.mp4', '.webm', '.mov', '.mkv'].includes(ext);
+
+      if (isVideo) {
+        if (isGemini) {
+          onLog?.(`[Input ${idx+1}] Sending video file directly (native support)...`);
+          try {
+            const buf = await fs.readFile(filePath);
+            content.push({
+              type: 'video_url',
+              video_url: { url: `data:video/mp4;base64,${buf.toString('base64')}` },
+            });
+          } catch (e) {
+            onLog?.(`[Input ${idx+1}] Failed to read video: ${e}`);
+          }
+        } else {
+          onLog?.(`[Input ${idx+1}] Non-Gemini model. Extracting frames for video...`);
+          try {
+            const duration = await getVideoDuration(filePath, context.signal);
+            onLog?.(`[Input ${idx+1}] Video duration: ${duration.toFixed(1)}s. Sampling 1 fps.`);
+            const frameCount = Math.min(Math.max(1, Math.ceil(duration)), 100);
+            const frames = await extractFrames(filePath, frameCount, duration, context.signal);
+            onLog?.(`[Input ${idx+1}] Extracted ${frames.length} frames.`);
+            for (const b64 of frames) {
+              content.push({
+                type: 'image_url',
+                image_url: { url: `data:image/jpeg;base64,${b64}` },
+              });
+            }
+          } catch (e) {
+            onLog?.(`[Input ${idx+1}] Frame extraction failed: ${e}`);
+          }
+        }
+      } else {
+        // Assume image
+        onLog?.(`[Input ${idx+1}] Processing as image...`);
+        try {
+          const { url } = await readImageOrVideoFrame(filePath, context.signal);
+          content.push({ type: 'image_url', image_url: { url } });
+        } catch (e) {
+          onLog?.(`[Input ${idx+1}] Failed to read image: ${e}`);
+        }
+      }
     }
 
-    onLog?.('Getting video duration...');
-    let durationSec = 0;
-    try {
-      durationSec = await getVideoDuration(inputPath);
-      onLog?.(`Video duration: ${durationSec.toFixed(1)}s`);
-    } catch (e) {
-      onLog?.(`Could not get duration: ${e}`);
-    }
-
-    onProgress?.(10, 'Extracting frames');
-    let frames: string[];
-    try {
-      frames = await extractFrames(inputPath, maxFrames, durationSec);
-      onLog?.(`Extracted ${frames.length} frame(s)`);
-    } catch (e) {
-      return { success: false, error: `Frame extraction failed: ${e}` };
-    }
-
-    if (frames.length === 0) {
-      return { success: false, error: 'No frames could be extracted from the video' };
+    if (content.length === 1) {
+      onLog?.('No media parts added. Sending text-only prompt.');
+    } else {
+      onLog?.(`Payload prepared with ${content.length - 1} media part(s).`);
     }
 
     onProgress?.(40, 'Calling OpenRouter');
-    const content: Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }> = [
-      { type: 'text', text: prompt },
-    ];
-    for (const b64 of frames) {
-      content.push({
-        type: 'image_url',
-        image_url: { url: `data:image/jpeg;base64,${b64}` },
-      });
-    }
+    onLog?.(`Sending request to OpenRouter (model: ${model})...`);
+    const bodySize = JSON.stringify(content).length;
+    onLog?.(`Request body size: ${(bodySize / 1024).toFixed(1)} KB`);
 
-    const body = {
-      model,
-      messages: [{ role: 'user' as const, content }],
-      max_tokens: maxTokens,
-      temperature,
-    };
+    const timeoutMs = 300_000; // 5 min for large video uploads
+    const fetchController = new AbortController();
+    const timeoutId = setTimeout(() => {
+      fetchController.abort();
+    }, timeoutMs);
+    context.signal?.addEventListener('abort', () => {
+      clearTimeout(timeoutId);
+      fetchController.abort();
+    }, { once: true });
 
     let res: Response;
     try {
@@ -193,36 +288,48 @@ export class OpenRouterVisionModule implements WorkflowModule {
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${apiKey}`,
+          'HTTP-Referer': 'https://github.com/SurninSynergy/online-game-commenter',
+          'X-Title': 'Online Game Commenter',
         },
-        body: JSON.stringify(body),
+        signal: fetchController.signal,
+        body: JSON.stringify({
+          model,
+          messages: [{ role: 'user', content }],
+          max_tokens: maxTokens,
+          temperature,
+        }),
       });
     } catch (e) {
-      return { success: false, error: `OpenRouter request failed: ${e}` };
+      clearTimeout(timeoutId);
+      onLog?.(`Request failed: ${e}`);
+      const msg = e instanceof Error && e.name === 'AbortError'
+        ? 'Request aborted (timeout or cancelled)'
+        : String(e);
+      return { success: false, error: `OpenRouter request failed: ${msg}` };
     }
+    clearTimeout(timeoutId);
 
     if (!res.ok) {
       const errText = await res.text();
+      onLog?.(`Error from OpenRouter: ${res.status} ${errText}`);
       return { success: false, error: `OpenRouter error ${res.status}: ${errText.slice(0, 500)}` };
     }
 
-    const data = await res.json() as { choices?: Array<{ message?: { content?: string | null } }> };
+    const data = await res.json() as any;
     const text = data?.choices?.[0]?.message?.content?.trim() ?? '';
+    onLog?.('Response received from OpenRouter.');
 
     onProgress?.(90, 'Writing output');
-
     const outDir = context.moduleCacheDir ?? context.tempDir;
     const ext = outputFormat === 'md' ? '.md' : '.txt';
     const outputPath = path.join(outDir, `output${ext}`);
     await fs.writeFile(outputPath, text, 'utf8');
+    onLog?.(`Result saved to output${ext}`);
 
     onProgress?.(100, 'Done');
-    onLog?.('OpenRouter response written to output file');
-
     return {
       success: true,
-      context: {
-        currentTextOutputPath: outputPath,
-      },
+      context: { currentTextOutputPath: outputPath },
     };
   }
 }

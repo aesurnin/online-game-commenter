@@ -163,7 +163,7 @@ export function AssetsPanel({ hideHeader }: { hideHeader?: boolean } = {}) {
   )
 }
 
-const PREVIEWABLE_EXT = /\.(mp4|webm|mov|mkv|jpg|jpeg|png|gif|webp|mp3|wav|ogg|m4a)$/i
+const PREVIEWABLE_EXT = /\.(mp4|webm|mov|mkv|jpg|jpeg|png|gif|webp|mp3|wav|ogg|m4a|txt|md)$/i
 
 function getContentTypeFromExt(filename: string): string {
   const ext = filename.toLowerCase().match(/\.[^.]+$/)?.[0] ?? ""
@@ -171,6 +171,7 @@ function getContentTypeFromExt(filename: string): string {
     ".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime", ".mkv": "video/x-matroska",
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp",
     ".mp3": "audio/mpeg", ".wav": "audio/wav", ".ogg": "audio/ogg", ".m4a": "audio/mp4",
+    ".txt": "text/plain", ".md": "text/markdown",
   }
   return map[ext] ?? "application/octet-stream"
 }

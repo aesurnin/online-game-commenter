@@ -62,6 +62,8 @@ export interface WorkflowContext {
   videoId: string;
   /** Path to current video file (local temp). Kept for backward compat; prefer variables. */
   currentVideoPath: string;
+  /** Resolved paths per input slot (e.g. video -> path, image -> path) for the current step */
+  inputPaths?: Record<string, string>;
   /** R2 key of the base/source video */
   sourceVideoKey: string;
   /** Workflow variables: variableName -> path or text value */
@@ -76,6 +78,8 @@ export interface WorkflowContext {
   moduleCacheDir?: string;
   /** Path to text output file (e.g. .txt/.md) produced by this module; used when output slot kind is 'text' */
   currentTextOutputPath?: string;
+  /** Optional: abort signal to stop long-running operations */
+  signal?: AbortSignal;
   /** Optional: report progress (0-100) and message during module execution */
   onProgress?: (percent: number, message: string) => void;
   /** Optional: append log line */

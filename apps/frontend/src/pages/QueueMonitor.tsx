@@ -26,6 +26,8 @@ type JobItem = {
 }
 
 type QueueStatus = {
+  redis?: 'ok' | 'error'
+  redisError?: string
   counts: {
     waiting: number
     active: number
@@ -116,6 +118,13 @@ export function QueueMonitor() {
         </div>
       </header>
       <main className="container mx-auto p-6 space-y-6">
+        {status?.redis === 'error' && (
+          <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-4">
+            <p className="font-medium text-destructive">Redis unreachable</p>
+            <p className="text-sm text-destructive/90 mt-1">{status.redisError}</p>
+            <p className="text-xs text-muted-foreground mt-2">Run: docker-compose up -d redis</p>
+          </div>
+        )}
         {error && (
           <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-4 text-destructive">
             {error}
@@ -123,7 +132,21 @@ export function QueueMonitor() {
         )}
         {status && (
           <>
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
+            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-6">
+              <Card>
+                <CardHeader className="flex flex-row items-center justify-between pb-2">
+                  <CardTitle className="text-sm font-medium">Redis</CardTitle>
+                  {status.redis === 'ok' ? (
+                    <CheckCircle className="h-4 w-4 text-green-600" />
+                  ) : (
+                    <XCircle className="h-4 w-4 text-destructive" />
+                  )}
+                </CardHeader>
+                <CardContent>
+                  <p className="text-2xl font-bold">{status.redis === 'ok' ? 'OK' : 'Error'}</p>
+                  <p className="text-xs text-muted-foreground">Queue backend</p>
+                </CardContent>
+              </Card>
               <Card>
                 <CardHeader className="flex flex-row items-center justify-between pb-2">
                   <CardTitle className="text-sm font-medium">Strategy</CardTitle>

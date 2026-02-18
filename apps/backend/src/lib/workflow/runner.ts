@@ -152,6 +152,75 @@ export async function getWorkflowCacheFilePath(
   return { absolutePath, contentType };
 }
 
+const VIDEO_EXT = ['.mp4', '.webm', '.mov', '.mkv'];
+const TEXT_EXT = ['.txt', '.md'];
+
+/** Find first output file in module cache dir by kind (video or text). Returns absolute path or null. */
+async function findOutputInCacheDir(dirPath: string, kind: 'video' | 'text'): Promise<string | null> {
+  const exts = kind === 'video' ? VIDEO_EXT : TEXT_EXT;
+  const names = kind === 'video'
+    ? ['output', 'crop_output']  // video.compress uses output*, video.crop uses crop_output*
+    : ['output'];
+  try {
+    const entries = await fs.readdir(dirPath, { withFileTypes: true });
+    for (const name of names) {
+      for (const ext of exts) {
+        const full = `${name}${ext}`;
+        const p = path.join(dirPath, full);
+        try {
+          const stat = await fs.stat(p);
+          if (stat.isFile()) return p;
+        } catch {
+          /* skip */
+        }
+      }
+    }
+    // Fallback: first file with matching extension
+    for (const e of entries) {
+      if (!e.isFile() || e.name.startsWith('.')) continue;
+      const ext = path.extname(e.name).toLowerCase();
+      if (exts.includes(ext)) return path.join(dirPath, e.name);
+    }
+  } catch {
+    /* dir missing or unreadable */
+  }
+  return null;
+}
+
+/** Load variables from workflow cache for steps 0..endExclusive. Used when running a single step. */
+async function loadVariablesFromCache(
+  cacheBase: string,
+  projectId: string,
+  videoId: string,
+  modules: WorkflowModuleDef[],
+  endExclusive: number,
+  variables: Record<string, string>,
+  onLog?: (msg: string) => void
+): Promise<void> {
+  const videoDir = path.join(cacheBase, projectId, videoId);
+  for (let i = 0; i < endExclusive && i < modules.length; i++) {
+    const def = modules[i];
+    const mod = getModule(def.type);
+    if (!mod || !def.outputs) continue;
+    let moduleCacheDir = await resolveModuleCacheDir(videoDir, def.id);
+    if (!moduleCacheDir) {
+      const folderName = getCacheFolderName(def.type, def.id);
+      moduleCacheDir = path.join(videoDir, folderName);
+    }
+    for (const [slotKey, varName] of Object.entries(def.outputs)) {
+      if (variables[varName]) continue;  // already set (e.g. from previousContext)
+      const meta = mod.meta as { outputSlots?: { key: string; kind: string }[] };
+      const slot = meta?.outputSlots?.find((s) => s.key === slotKey);
+      const kind = slot?.kind === 'text' ? 'text' : 'video';
+      const outPath = await findOutputInCacheDir(moduleCacheDir, kind);
+      if (outPath) {
+        variables[varName] = outPath;
+        onLog?.(`[Runner] Loaded from cache: ${varName} <- ${path.basename(moduleCacheDir)}/${path.basename(outPath)}`);
+      }
+    }
+  }
+}
+
 /** Remove cache directories for given module IDs. Safe to call with non-existent paths. */
 export async function cleanupWorkflowModuleCache(
   projectId: string,
@@ -270,6 +339,12 @@ export async function runWorkflow(options: RunOptions): Promise<RunResult> {
   const cacheBase = getWorkflowCacheBase();
   const startIdx = stepIndex ?? 0;
   const endIdx = stepIndex != null ? stepIndex + 1 : modules.length;
+
+  // When running a single step, load variables from cache (video_crop etc.) so inputs are available
+  if (stepIndex != null && stepIndex > 0) {
+    await loadVariablesFromCache(cacheBase, projectId, videoId, modules, stepIndex, variables, onLog);
+  }
+
   const stepResults: RunResult['stepResults'] = [];
   let lastStepOutput: RunResult['lastStepOutput'];
 

@@ -40,7 +40,10 @@ const WINDOW_POSITION = process.env.SCREENCAST_WINDOW_POSITION || '9999,9999';
 async function resolveUrl(url: string): Promise<{ finalUrl: string; isHtml: boolean }> {
   const res = await fetch(url, {
     redirect: 'follow',
-    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ScreencastBot/1.0)' },
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    },
   });
   return { finalUrl: res.url, isHtml: (res.headers.get('content-type') || '').includes('text/html') };
 }
@@ -505,7 +508,7 @@ async function runScreencastJob(jobData: ScreencastJobData): Promise<void> {
     if (!v0 || v0.status === 'cancelled') return;
     const { finalUrl, isHtml } = await resolveUrl(url);
     log(`URL: ${finalUrl}`);
-    if (!isHtml) throw new Error(`URL does not serve HTML: ${finalUrl}`);
+    if (!isHtml) log(`Warning: URL pre-check did not return text/html (will try loading in browser anyway): ${finalUrl}`);
     const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || puppeteer.executablePath();
     // headless: 'new' = no visible window (macOS ignores --window-position). Set SCREENCAST_HEADLESS=false for visible window.
     const useHeadless = process.env.SCREENCAST_HEADLESS !== 'false';

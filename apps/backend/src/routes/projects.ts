@@ -7,6 +7,7 @@ import z from 'zod';
 import { uploadToR2, deleteFromR2, deletePrefixFromR2, getPresignedUrl, listObjectsWithMetaFromR2, streamObjectFromR2 } from '../lib/r2.js';
 import fs from 'fs';
 import { cleanupWorkflowModuleCache, ensureWorkflowModuleCacheDirs, listWorkflowModuleCache, listWorkflowCacheFolderContents, getWorkflowCacheFilePath } from '../lib/workflow/runner.js';
+import { resolveWorkflowVariablesForApi } from '../lib/workflow/variable-resolver.js';
 import { addScreencastJob, removeScreencastJobByVideoId } from '../lib/queue.js';
 import { getFrame, clearFrame } from '../lib/live-preview-store.js';
 import { getVideoLogs } from '../lib/video-logs-store.js';
@@ -569,50 +570,15 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
       url: video.sourceUrl?.startsWith('projects/') ? `/api/projects/${projectId}/videos/${videoId}/stream` : undefined,
     };
 
-    const cacheFolders = await listWorkflowModuleCache(projectId, videoId);
-    const folderByModuleId = new Map(cacheFolders.map((f) => [f.moduleId, f.folderName]));
-
-    const OUTPUT_FILES_BY_TYPE: Record<string, string[]> = {
-      'video.compress': ['output.mp4'],
-      'video.crop': ['crop_output.mp4', 'output.mp4'],
-      'llm.openrouter.vision': ['output.md', 'output.txt'],
-    };
-
-    for (const mod of modules) {
-      if (!mod.outputs) continue;
-      const folderName = folderByModuleId.get(mod.id);
-      if (!folderName) continue;
-
-      const candidates = OUTPUT_FILES_BY_TYPE[mod.type] ?? ['output.mp4', 'output.txt', 'output.md'];
-      let foundFile: string | null = null;
-      try {
-        const entries = await listWorkflowCacheFolderContents(projectId, videoId, folderName);
-        for (const c of candidates) {
-          if (entries.some((e) => e.type === 'file' && e.name === c)) {
-            foundFile = c;
-            break;
-          }
-        }
-        if (!foundFile && entries.some((e) => e.type === 'file')) {
-          const first = entries.find((e) => e.type === 'file');
-          if (first) foundFile = first.name;
-        }
-      } catch {
-        /* folder not found or empty */
-      }
-
-      if (foundFile) {
-        const fileUrl = `/api/projects/${projectId}/videos/${videoId}/workflow-cache/${encodeURIComponent(folderName)}/file?path=${encodeURIComponent(foundFile)}`;
-        for (const [slotKey, varName] of Object.entries(mod.outputs)) {
-          if (!varName) continue;
-          const isText = mod.type === 'llm.openrouter.vision' || foundFile.endsWith('.txt') || foundFile.endsWith('.md');
-          values[varName] = {
-            value: fileUrl,
-            preview: isText ? '(text file)' : '(video file)',
-            url: fileUrl,
-          };
-        }
-      }
+    // Use central variable resolver (same as runner) — safe for variable renames
+    const resolved = await resolveWorkflowVariablesForApi(projectId, videoId, { modules });
+    for (const [varName, info] of Object.entries(resolved)) {
+      const fileUrl = `/api/projects/${projectId}/videos/${videoId}/workflow-cache/${encodeURIComponent(info.folderName)}/file?path=${encodeURIComponent(info.fileName)}`;
+      values[varName] = {
+        value: fileUrl,
+        preview: info.isText ? '(text file)' : '(video file)',
+        url: fileUrl,
+      };
     }
 
     return reply.send({ variables: values });

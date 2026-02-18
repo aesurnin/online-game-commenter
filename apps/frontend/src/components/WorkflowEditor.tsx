@@ -436,6 +436,9 @@ export function WorkflowEditor() {
     const lastVideoOutput = prevModules
       .flatMap((m) => (m.outputs?.video ? [m.outputs.video] : []))
       .pop()
+    const lastTextOutput = prevModules
+      .flatMap((m) => (m.outputs?.text ? [m.outputs.text] : []))
+      .pop()
     const nextVideoNum =
       prevModules.reduce((n, m) => {
         const v = m.outputs?.video
@@ -453,6 +456,9 @@ export function WorkflowEditor() {
     for (const slot of meta?.inputSlots ?? []) {
       if (slot.kind === "video") {
         inputs[slot.key] = lastVideoOutput ?? "source"
+      }
+      if (slot.kind === "text") {
+        inputs[slot.key] = lastTextOutput ?? ""
       }
     }
     for (const slot of meta?.outputSlots ?? []) {
@@ -575,30 +581,45 @@ export function WorkflowEditor() {
     updateVideoState(videoId, { workflow: { ...workflow, modules: mods } })
   }
 
-  const getAvailableVariablesForModule = (moduleIndex: number): string[] => {
-    const vars = new Set<string>(["source"])
+  /** Build a map of variable name -> slot kind for all outputs up to (exclusive) moduleIndex. */
+  const getVariableKindMap = (moduleIndex: number): Record<string, string> => {
+    const map: Record<string, string> = { source: "video" }
     for (let i = 0; i < moduleIndex; i++) {
       const m = workflow?.modules[i]
-      if (m?.outputs) {
-        for (const v of Object.values(m.outputs)) vars.add(v)
+      const meta = moduleTypes.find((mt) => mt.type === m?.type)
+      if (!m?.outputs) continue
+      for (const [slotKey, varName] of Object.entries(m.outputs)) {
+        const slot = meta?.outputSlots?.find((s) => s.key === slotKey)
+        map[varName] = slot?.kind ?? "file"
       }
     }
-    return Array.from(vars).sort()
+    return map
+  }
+
+  const getAvailableVariablesForModule = (moduleIndex: number): string[] => {
+    return Object.keys(getVariableKindMap(moduleIndex)).sort()
+  }
+
+  /**
+   * Get available variables filtered by slot kind.
+   * - "video" slots -> only video variables
+   * - "text" slots  -> only text variables
+   * - "file" slots  -> all variables (video, text, file)
+   */
+  const getAvailableVariablesByKindForModule = (moduleIndex: number, kind: string): string[] => {
+    const map = getVariableKindMap(moduleIndex)
+    if (kind === "file") {
+      return Object.keys(map).sort()
+    }
+    return Object.entries(map)
+      .filter(([, k]) => k === kind)
+      .map(([name]) => name)
+      .sort()
   }
 
   /** Only variables that hold text (from steps with text output slots). Use for prompt placeholders. */
   const getAvailableTextVariablesForModule = (moduleIndex: number): string[] => {
-    const vars = new Set<string>()
-    for (let i = 0; i < moduleIndex; i++) {
-      const m = workflow?.modules[i]
-      const meta = moduleTypes.find((mt) => mt.type === m?.type)
-      if (!m?.outputs || !meta?.outputSlots) continue
-      for (const [slotKey, varName] of Object.entries(m.outputs)) {
-        const slot = meta.outputSlots.find((s) => s.key === slotKey)
-        if (slot?.kind === "text") vars.add(varName)
-      }
-    }
-    return Array.from(vars).sort()
+    return getAvailableVariablesByKindForModule(moduleIndex, "text")
   }
 
   const runStep = async (stepIndex: number) => {
@@ -888,6 +909,7 @@ export function WorkflowEditor() {
                   onPreview={() => stepOutputUrls[idx] && handlePreview(stepOutputUrls[idx], `Step ${idx + 1}`, stepOutputContentTypes[idx])}
                   getModuleLabel={getModuleLabel}
                   getAvailableVariables={() => getAvailableVariablesForModule(idx)}
+                  getAvailableVariablesByKind={(kind) => getAvailableVariablesByKindForModule(idx, kind)}
                   onOpenCrop={() => handleOpenCrop(idx)}
                   onOpenPromptBuilder={(paramKey) => setOpenPromptBuilder({ index: idx, paramKey })}
                 />
@@ -975,6 +997,7 @@ function ModuleBlock({
   onPreview,
   getModuleLabel,
   getAvailableVariables,
+  getAvailableVariablesByKind,
   onOpenCrop,
   onOpenPromptBuilder,
 }: {
@@ -996,6 +1019,7 @@ function ModuleBlock({
   onPreview: () => void
   getModuleLabel: (type: string) => string
   getAvailableVariables: () => string[]
+  getAvailableVariablesByKind: (kind: string) => string[]
   onOpenCrop?: () => void
   onOpenPromptBuilder?: (paramKey: string) => void
 }) {
@@ -1183,16 +1207,16 @@ function ModuleBlock({
                     className="h-7 rounded-md border border-input bg-background px-2 text-xs flex-1"
                     value={
                       module.inputs?.[slot.key] ??
-                      (slot.kind === "video" ? (index === 0 ? "source" : getAvailableVariables().pop() ?? "source") : "")
+                      (slot.kind === "video" ? (index === 0 ? "source" : getAvailableVariablesByKind("video").pop() ?? "source") : "")
                     }
                     onChange={(e) =>
                       onInputsChange({ ...(module.inputs ?? {}), [slot.key]: e.target.value })
                     }
                   >
-                    {slot.kind === "file" && (
+                    {(slot.kind === "file" || slot.kind === "text") && (
                       <option value="">— None —</option>
                     )}
-                    {getAvailableVariables().map((v) => (
+                    {getAvailableVariablesByKind(slot.kind).map((v) => (
                       <option key={v} value={v}>
                         ({v})
                       </option>

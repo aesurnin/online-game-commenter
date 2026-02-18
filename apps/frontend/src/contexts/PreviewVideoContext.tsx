@@ -8,6 +8,12 @@ export type PreviewAssetMetadata = {
   duration?: number
   width?: number
   height?: number
+  /** Token usage from workflow module metadata (e.g. llm-agent) */
+  tokenUsage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number }
+  /** Estimated cost in USD (from OpenRouter pricing) */
+  costUsd?: number
+  /** Execution time in milliseconds */
+  executionTimeMs?: number
 }
 
 export type PreviewAssetState = {
@@ -15,6 +21,10 @@ export type PreviewAssetState = {
   label?: string
   contentType?: string
   metadata?: PreviewAssetMetadata
+  /** When set, show Remotion Player instead of video (for video.render.remotion module) */
+  remotionSceneUrl?: string
+  /** When set, show Remotion Player directly with inline scene data (no URL fetch needed) */
+  inlineRemotionScene?: Record<string, unknown>
 } | null
 
 const PreviewVideoContext = createContext<{

@@ -16,7 +16,8 @@ import { getModule } from './registry.js';
 
 const MODULE_ID_FILE = '.module-id';
 const VIDEO_EXT = ['.mp4', '.webm', '.mov', '.mkv'];
-const TEXT_EXT = ['.txt', '.md'];
+const TEXT_EXT = ['.txt', '.md', '.json'];
+const FILE_EXT = ['.mp3', '.wav', '.m4a', '.ogg'];
 
 function getWorkflowCacheBase(): string {
   const base = process.env.WORKFLOW_CACHE_BASE;
@@ -46,8 +47,8 @@ async function resolveModuleCacheDir(videoDir: string, moduleId: string): Promis
   return null;
 }
 
-async function findOutputInCacheDir(dirPath: string, kind: 'video' | 'text'): Promise<string | null> {
-  const exts = kind === 'video' ? VIDEO_EXT : TEXT_EXT;
+async function findOutputInCacheDir(dirPath: string, kind: 'video' | 'text' | 'file'): Promise<string | null> {
+  const exts = kind === 'video' ? VIDEO_EXT : kind === 'text' ? TEXT_EXT : FILE_EXT;
   const names = kind === 'video' ? ['output', 'crop_output'] : ['output'];
   try {
     const entries = await fs.readdir(dirPath, { withFileTypes: true });
@@ -121,7 +122,7 @@ export async function resolveWorkflowVariables(
       if (variables[varName]) continue;
       const meta = mod.meta as { outputSlots?: { key: string; kind: string }[] };
       const slot = meta?.outputSlots?.find((s) => s.key === slotKey);
-      const kind = slot?.kind === 'text' ? 'text' : 'video';
+      const kind = slot?.kind === 'text' ? 'text' : slot?.kind === 'file' ? 'file' : 'video';
       const outPath = await findOutputInCacheDir(moduleCacheDir, kind);
       if (outPath) {
         variables[varName] = outPath;
@@ -162,7 +163,7 @@ export async function resolveWorkflowVariablesForApi(
     for (const [slotKey, varName] of Object.entries(def.outputs)) {
       const meta = mod.meta as { outputSlots?: { key: string; kind: string }[] };
       const slot = meta?.outputSlots?.find((s) => s.key === slotKey);
-      const kind = slot?.kind === 'text' ? 'text' : 'video';
+      const kind = slot?.kind === 'text' ? 'text' : slot?.kind === 'file' ? 'file' : 'video';
       const outPath = await findOutputInCacheDir(moduleCacheDir, kind);
       if (outPath) {
         result[varName] = {

@@ -3,6 +3,9 @@ import { VideoCompressorModule } from './modules/video-compressor.js';
 import { VideoCropModule } from './modules/video-crop.js';
 import { OpenRouterVisionModule } from './modules/openrouter-vision.js';
 import { VideoClipCutterModule } from './modules/video-clip-cutter.js';
+import { LlmAgentModule } from './modules/llm-agent.js';
+import { TtsElevenlabsModule } from './modules/tts-elevenlabs.js';
+import { VideoRenderRemotionModule } from './modules/video-render-remotion.js';
 
 const modules = new Map<string, WorkflowModule>();
 
@@ -14,6 +17,9 @@ register(new VideoCompressorModule());
 register(new VideoCropModule());
 register(new OpenRouterVisionModule());
 register(new VideoClipCutterModule());
+register(new LlmAgentModule());
+register(new TtsElevenlabsModule());
+register(new VideoRenderRemotionModule());
 
 export function getModule(type: string): WorkflowModule | undefined {
   return modules.get(type);

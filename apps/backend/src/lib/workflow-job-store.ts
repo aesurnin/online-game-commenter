@@ -6,16 +6,32 @@
 
 export type WorkflowJobStatus = 'pending' | 'active' | 'completed' | 'failed';
 
+export interface TokenUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+}
+
 export interface WorkflowJobState {
   jobId: string;
   status: WorkflowJobStatus;
   progress: number; // 0-100
   message: string;
   logs: string[];
+  /** Agent reasoning steps (llm.agent module) streamed in real-time */
+  agentReasoningSteps: string[];
   stepIndex?: number;
   outputUrl?: string;
   /** MIME type of output (e.g. text/plain, text/markdown) when output is a text file */
   outputContentType?: string;
+  /** URL to scene.json for Remotion preview (video.render.remotion module) */
+  remotionSceneUrl?: string;
+  /** Aggregated token usage from all paid-API modules in this run */
+  totalTokenUsage?: TokenUsage;
+  /** Estimated cost in USD (OpenRouter pricing) */
+  totalCostUsd?: number;
+  /** Total execution time in milliseconds */
+  totalExecutionTimeMs?: number;
   error?: string;
   stepResults?: { index: number; moduleId: string; success: boolean; error?: string }[];
   projectId?: string;
@@ -35,6 +51,7 @@ export function createJob(overrides?: Partial<WorkflowJobState>): { jobId: strin
     progress: 0,
     message: '',
     logs: [],
+    agentReasoningSteps: [],
     ...overrides,
   };
   jobs.set(jobId, state);
@@ -63,7 +80,7 @@ export function listJobs(): WorkflowJobState[] {
 
 export function updateJob(
   jobId: string,
-  update: Partial<Pick<WorkflowJobState, 'status' | 'progress' | 'message' | 'outputUrl' | 'outputContentType' | 'error' | 'stepResults'>>
+  update: Partial<Pick<WorkflowJobState, 'status' | 'progress' | 'message' | 'outputUrl' | 'outputContentType' | 'totalTokenUsage' | 'totalCostUsd' | 'totalExecutionTimeMs' | 'error' | 'stepResults'>>
 ) {
   const state = jobs.get(jobId);
   if (state) Object.assign(state, update);
@@ -72,4 +89,9 @@ export function updateJob(
 export function appendJobLog(jobId: string, message: string) {
   const state = jobs.get(jobId);
   if (state) state.logs.push(message);
+}
+
+export function appendAgentReasoning(jobId: string, content: string) {
+  const state = jobs.get(jobId);
+  if (state) state.agentReasoningSteps.push(content);
 }

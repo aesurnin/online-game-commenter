@@ -11,6 +11,7 @@ import { useSelectedVideo } from "@/contexts/SelectedVideoContext"
 import { usePreviewVideo } from "@/contexts/PreviewVideoContext"
 import { useAddStepPanel } from "@/contexts/AddStepPanelContext"
 import { ModulePickerPanel } from "@/components/ModulePickerPanel"
+import { AgentReasoningOverlay } from "@/components/AgentReasoningOverlay"
 
 const PROJECT_LAYOUT_STORAGE_KEY = "project-layout-videos-assets-main"
 const PROJECT_PANELS_VISIBLE_KEY = "project-panels-visible"
@@ -62,6 +63,7 @@ export function ProjectView({
   const [editingVideoName, setEditingVideoName] = useState("")
   const [videoToDelete, setVideoToDelete] = useState<VideoEntity | null>(null)
   const [deleting, setDeleting] = useState(false)
+  const [activeWorkflowVideoIds, setActiveWorkflowVideoIds] = useState<Set<string>>(new Set())
   const fileInputRef = useRef<HTMLInputElement>(null)
   const navigate = useNavigate()
 
@@ -170,6 +172,26 @@ export function ProjectView({
     const interval = setInterval(refreshVideosAndSelection, 1500)
     return () => clearInterval(interval)
   }, [id, hasProcessing])
+
+  /** Poll active workflow jobs for busy indicators on video cards */
+  useEffect(() => {
+    if (!id) return
+    const fetchActive = () => {
+      fetch(`/api/projects/${id}/active-workflow-jobs`, { credentials: "include" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data: { jobs?: { videoId: string }[] } | null) => {
+          if (data?.jobs) {
+            setActiveWorkflowVideoIds(new Set(data.jobs.map((j) => j.videoId)))
+          } else {
+            setActiveWorkflowVideoIds(new Set())
+          }
+        })
+        .catch(() => setActiveWorkflowVideoIds(new Set()))
+    }
+    fetchActive()
+    const interval = setInterval(fetchActive, 2000)
+    return () => clearInterval(interval)
+  }, [id])
 
   useEffect(() => {
     if (!selectedVideo || selectedVideo.status !== "processing") return
@@ -573,15 +595,21 @@ export function ProjectView({
             </Button>
           </div>
           <div className="flex-1 overflow-y-auto p-1.5 min-h-0">
-            {videos.map((v) => (
+            {videos.map((v) => {
+              const isBusy = activeWorkflowVideoIds.has(v.id)
+              return (
               <div
                 key={v.id}
                 className={`group flex items-center gap-2 px-2 py-2 rounded-md cursor-pointer hover:bg-muted/80 transition-colors ${
                   selectedVideo?.id === v.id && !showAddForm ? "bg-muted" : ""
-                }`}
+                } ${isBusy ? "border-l-2 border-l-primary bg-primary/5" : ""}`}
                 onClick={() => handleVideoClick(v)}
               >
-                <Video className="h-4 w-4 shrink-0 text-muted-foreground" />
+                {isBusy ? (
+                  <Loader2 className="h-4 w-4 shrink-0 text-primary animate-spin" />
+                ) : (
+                  <Video className="h-4 w-4 shrink-0 text-muted-foreground" />
+                )}
                 {editingVideoId === v.id ? (
                   <Input
                     className="h-6 flex-1 text-sm min-w-0"
@@ -630,7 +658,8 @@ export function ProjectView({
                   <Trash2 className="h-3.5 w-3.5 text-destructive" />
                 </Button>
               </div>
-            ))}
+              )
+            })}
           </div>
         </Panel>
         <Separator className="shrink-0" />
@@ -658,6 +687,7 @@ export function ProjectView({
             </>
           )}
         <Panel id="main" defaultSize={`${layout.main}%`} minSize="25%" className="min-w-0 flex flex-col bg-panel-0 relative">
+          <AgentReasoningOverlay />
           <>
           {selectedVideo && !showAddForm && (
             <div className="w-full max-w-4xl mx-auto px-6 pt-3 pb-2 flex items-center gap-2 shrink-0">
@@ -869,17 +899,25 @@ export function ProjectView({
                 Restart
               </Button>
             </div>
-          ) : previewVideo?.url ? (
+          ) : (previewVideo && (previewVideo.url || previewVideo.inlineRemotionScene || previewVideo.remotionSceneUrl)) ? (
             <UniversalViewer asset={previewVideo} onClose={() => setPreviewVideo(null)} />
           ) : (selectedVideo?.streamUrl ?? selectedVideo?.playUrl ?? selectedVideo?.sourceUrl) ? (
             <div className="w-full max-w-4xl space-y-2">
-              <div className="aspect-video bg-black rounded-lg overflow-hidden shadow-lg">
+              <div className={`relative aspect-video bg-black rounded-lg overflow-hidden shadow-lg ${activeWorkflowVideoIds.has(selectedVideo!.id) ? "ring-2 ring-primary ring-offset-2 ring-offset-background" : ""}`}>
                 <video
                   src={selectedVideo!.streamUrl ?? selectedVideo!.playUrl ?? selectedVideo!.sourceUrl}
                   controls
                   preload="metadata"
                   className="w-full h-full object-contain"
                 />
+                {activeWorkflowVideoIds.has(selectedVideo!.id) && (
+                  <div className="absolute inset-0 flex items-center justify-center bg-black/40 pointer-events-none">
+                    <span className="inline-flex items-center gap-2 rounded-md bg-primary/90 px-3 py-2 text-sm font-medium text-primary-foreground">
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      Workflow running
+                    </span>
+                  </div>
+                )}
               </div>
               {selectedVideo.metadata?.stopReason && (
                 <p className="text-xs text-center text-muted-foreground">

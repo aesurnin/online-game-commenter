@@ -6,9 +6,10 @@ import { and, eq, count } from 'drizzle-orm';
 import z from 'zod';
 import { uploadToR2, deleteFromR2, deletePrefixFromR2, getPresignedUrl, listObjectsWithMetaFromR2, streamObjectFromR2 } from '../lib/r2.js';
 import fs from 'fs';
-import { cleanupWorkflowModuleCache, ensureWorkflowModuleCacheDirs, listWorkflowModuleCache, listWorkflowCacheFolderContents, getWorkflowCacheFilePath } from '../lib/workflow/runner.js';
+import { cleanupWorkflowModuleCache, ensureWorkflowModuleCacheDirs, listWorkflowModuleCache, listWorkflowCacheFolderContents, getWorkflowCacheFilePath, readWorkflowModuleMetadata } from '../lib/workflow/runner.js';
 import { resolveWorkflowVariablesForApi } from '../lib/workflow/variable-resolver.js';
 import { addScreencastJob, removeScreencastJobByVideoId } from '../lib/queue.js';
+import { listJobs } from '../lib/workflow-job-store.js';
 import { getFrame, clearFrame } from '../lib/live-preview-store.js';
 import { getVideoLogs } from '../lib/video-logs-store.js';
 
@@ -62,6 +63,25 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
       .where(eq(videoEntities.projectId, id));
     const videoCount = Number(videoCountVal ?? 0);
     return reply.send({ ...project, videoCount });
+  });
+
+  /** List active workflow jobs for this project (for UI restore + busy indicators) */
+  fastify.get('/:id/active-workflow-jobs', async (request, reply) => {
+    const { id: projectId } = request.params as { id: string };
+    const project = await db.query.projects.findFirst({
+      where: (p, { and, eq }) => and(eq(p.id, projectId), eq(p.ownerId, request.user!.id)),
+    });
+    if (!project) return reply.status(404).send({ error: 'Not found' });
+    const jobs = listJobs().filter(
+      (j) => j.projectId === projectId && j.videoId && j.status !== 'completed' && j.status !== 'failed'
+    );
+    return reply.send({
+      jobs: jobs.map((j) => ({
+        videoId: j.videoId,
+        jobId: j.jobId,
+        workflowId: j.workflowId,
+      })),
+    });
   });
 
   fastify.get('/:id/videos', async (request, reply) => {
@@ -603,6 +623,44 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
 
     const folders = await listWorkflowModuleCache(projectId, videoId);
     return reply.send({ workflowCache: folders });
+  });
+
+  fastify.get('/:id/videos/:videoId/workflow-cache/metadata', async (request, reply) => {
+    const { id: projectId, videoId } = request.params as { id: string; videoId: string };
+    const project = await db.query.projects.findFirst({
+      where: (p, { and, eq }) => and(eq(p.id, projectId), eq(p.ownerId, request.user!.id)),
+    });
+    if (!project) return reply.status(404).send({ error: 'Not found' });
+
+    const [video] = await db.select()
+      .from(videoEntities)
+      .where(and(eq(videoEntities.id, videoId), eq(videoEntities.projectId, projectId)));
+    if (!video) return reply.status(404).send({ error: 'Video not found' });
+
+    const folders = await listWorkflowModuleCache(projectId, videoId);
+    const byModuleId: Record<string, { executionTimeMs?: number; costUsd?: number; tokenUsage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } }> = {};
+    let aggregatedCostUsd = 0;
+    let aggregatedExecutionTimeMs = 0;
+    const aggregatedTokenUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+    for (const { folderName, moduleId } of folders) {
+      const meta = await readWorkflowModuleMetadata(projectId, videoId, folderName);
+      if (meta) {
+        byModuleId[moduleId] = meta;
+        if (typeof meta.costUsd === 'number' && meta.costUsd > 0) aggregatedCostUsd += meta.costUsd;
+        if (typeof meta.executionTimeMs === 'number' && meta.executionTimeMs > 0) aggregatedExecutionTimeMs += meta.executionTimeMs;
+        if (meta.tokenUsage) {
+          aggregatedTokenUsage.prompt_tokens += meta.tokenUsage.prompt_tokens ?? 0;
+          aggregatedTokenUsage.completion_tokens += meta.tokenUsage.completion_tokens ?? 0;
+          aggregatedTokenUsage.total_tokens += meta.tokenUsage.total_tokens ?? (meta.tokenUsage.prompt_tokens ?? 0) + (meta.tokenUsage.completion_tokens ?? 0);
+        }
+      }
+    }
+    const lastRun = {
+      totalCostUsd: aggregatedCostUsd > 0 ? aggregatedCostUsd : undefined,
+      totalExecutionTimeMs: aggregatedExecutionTimeMs > 0 ? aggregatedExecutionTimeMs : undefined,
+      totalTokenUsage: aggregatedTokenUsage.total_tokens > 0 ? aggregatedTokenUsage : undefined,
+    };
+    return reply.send({ metadata: byModuleId, lastRun });
   });
 
   fastify.get<{

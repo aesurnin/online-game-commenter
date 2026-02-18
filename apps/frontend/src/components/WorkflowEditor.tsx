@@ -18,18 +18,22 @@ import {
   FileUp,
   Save,
   Eye,
+  Clapperboard,
   Crop as CropIcon,
   Pencil,
   PlusCircle,
   MinusCircle,
   Database,
   Eraser,
+  Clock,
+  DollarSign,
 } from "lucide-react"
 import { useSelectedVideo } from "@/contexts/SelectedVideoContext"
 import { useLogs } from "@/contexts/LogsContext"
 import { usePreviewVideo } from "@/contexts/PreviewVideoContext"
 import { useAddStepPanel } from "@/contexts/AddStepPanelContext"
 import { useWorkflowVariable } from "@/contexts/WorkflowVariableContext"
+import { useWorkflowJob } from "@/contexts/WorkflowJobContext"
 
 type WorkflowModuleDef = {
   id: string
@@ -68,17 +72,28 @@ type ModuleMeta = {
 
 type StepStatus = "pending" | "running" | "done" | "error"
 
+type TokenUsage = { prompt_tokens: number; completion_tokens: number; total_tokens: number }
+
 type VideoWorkflowState = {
   currentWorkflowId: string | null
   workflow: WorkflowDefinition | null
   stepStatuses: Record<number, StepStatus>
   stepOutputUrls: Record<number, string>
   stepOutputContentTypes: Record<number, string>
+  stepRemotionSceneUrls: Record<number, string>
   activeJobId: string | null
   activeJobStepIndex: number | undefined
   jobProgress: number
   jobMessage: string
   jobLogs: string[]
+  jobStepIndex: number | undefined
+  jobAgentReasoningSteps: string[]
+  /** Token usage from last completed run (aggregated across all paid-API modules) */
+  lastTotalTokenUsage: TokenUsage | null
+  /** Estimated cost in USD from last completed run */
+  lastTotalCostUsd: number | null
+  /** Total execution time in ms from last completed run */
+  lastTotalExecutionTimeMs: number | null
   runningAll: boolean
 }
 
@@ -88,11 +103,17 @@ const defaultVideoState = (): VideoWorkflowState => ({
   stepStatuses: {},
   stepOutputUrls: {},
   stepOutputContentTypes: {},
+  stepRemotionSceneUrls: {},
   activeJobId: null,
   activeJobStepIndex: undefined,
   jobProgress: 0,
   jobMessage: "",
   jobLogs: [],
+  jobStepIndex: undefined,
+  jobAgentReasoningSteps: [],
+  lastTotalTokenUsage: null,
+  lastTotalCostUsd: null,
+  lastTotalExecutionTimeMs: null,
   runningAll: false,
 })
 
@@ -116,10 +137,25 @@ function loadFromCache(projectId: string, videoId: string): Partial<VideoWorkflo
         if (v === "running") continue
         sanitized[Number(k)] = v as StepStatus
       }
+      // If a step has an outputUrl it completed successfully — override any stale status
+      if (parsed.stepOutputUrls) {
+        for (const [k, url] of Object.entries(parsed.stepOutputUrls)) {
+          if (url) sanitized[Number(k)] = "done"
+        }
+      }
       parsed.stepStatuses = sanitized
     }
     parsed.activeJobId = null
     parsed.runningAll = false
+    if (parsed.lastTotalTokenUsage && typeof parsed.lastTotalTokenUsage.total_tokens !== "number") {
+      parsed.lastTotalTokenUsage = undefined
+    }
+    if (typeof parsed.lastTotalCostUsd !== "number" || parsed.lastTotalCostUsd <= 0) {
+      parsed.lastTotalCostUsd = undefined
+    }
+    if (typeof parsed.lastTotalExecutionTimeMs !== "number" || parsed.lastTotalExecutionTimeMs <= 0) {
+      parsed.lastTotalExecutionTimeMs = undefined
+    }
     return parsed
   } catch {
     return null
@@ -138,7 +174,11 @@ function saveToCache(projectId: string, videoId: string, state: VideoWorkflowSta
       stepStatuses: sanitizedStatuses,
       stepOutputUrls: state.stepOutputUrls,
       stepOutputContentTypes: state.stepOutputContentTypes,
+      stepRemotionSceneUrls: state.stepRemotionSceneUrls,
       jobLogs: state.jobLogs.slice(-MAX_CACHED_LOGS),
+      lastTotalTokenUsage: state.lastTotalTokenUsage ?? undefined,
+      lastTotalCostUsd: state.lastTotalCostUsd ?? undefined,
+      lastTotalExecutionTimeMs: state.lastTotalExecutionTimeMs ?? undefined,
     }
     localStorage.setItem(getCacheKey(projectId, videoId), JSON.stringify(toSave))
   } catch {
@@ -152,8 +192,9 @@ function generateId() {
 
 export function WorkflowEditor() {
   const { selectedVideo, refreshAssets } = useSelectedVideo()
-  const { addLog } = useLogs()
+  const { addLog, fetchLogsForVideo } = useLogs()
   const workflowVariable = useWorkflowVariable()
+  const { setAgentOverlay } = useWorkflowJob()
   const { setPreviewVideo } = usePreviewVideo()
   const { openAddStepPanel, closeAddStepPanel, setOnSelectModule } = useAddStepPanel()
   const [workflows, setWorkflows] = useState<{ id: string; name?: string }[]>([])
@@ -166,6 +207,7 @@ export function WorkflowEditor() {
   const [cropModuleIndex, setCropModuleIndex] = useState<number | null>(null)
   const [openPromptBuilder, setOpenPromptBuilder] = useState<{ index: number; paramKey: string } | null>(null)
   const [variableManagerOpen, setVariableManagerOpen] = useState(false)
+  const [stepMetadataByModuleId, setStepMetadataByModuleId] = useState<Record<string, { executionTimeMs?: number; costUsd?: number }>>({})
   const [autoSave, setAutoSave] = useState(() => {
     try {
       return localStorage.getItem(AUTOSAVE_KEY) !== "false"
@@ -184,10 +226,16 @@ export function WorkflowEditor() {
     stepStatuses,
     stepOutputUrls,
     stepOutputContentTypes,
+    stepRemotionSceneUrls = {},
     activeJobId,
     jobProgress,
     jobMessage,
     jobLogs,
+    jobStepIndex,
+    jobAgentReasoningSteps,
+    lastTotalTokenUsage,
+    lastTotalCostUsd,
+    lastTotalExecutionTimeMs,
     runningAll,
   } = videoState
 
@@ -311,26 +359,70 @@ export function WorkflowEditor() {
           return
         }
         const job = await r.json()
+        if (projectIdRef.current && jobVideoId) {
+          fetchLogsForVideo(projectIdRef.current, jobVideoId).catch(() => {})
+        }
         setStateByVideo((prev) => {
           const current = prev[jobVideoId] ?? defaultVideoState()
-          const next = { ...current, jobProgress: job.progress ?? 0, jobMessage: job.message ?? "", jobLogs: job.logs ?? [] }
+          const wf = current.workflow
+          const stepIdx = job.stepIndex
+          const statuses: Record<number, StepStatus> = {}
+          if (wf?.modules) {
+            for (let i = 0; i < wf.modules.length; i++) {
+              if (stepIdx != null) {
+                statuses[i] = i < stepIdx ? "done" : i === stepIdx ? "running" : "pending"
+              }
+            }
+          }
+          const next = {
+            ...current,
+            jobProgress: job.progress ?? 0,
+            jobMessage: job.message ?? "",
+            jobLogs: job.logs ?? [],
+            jobStepIndex: job.stepIndex,
+            jobAgentReasoningSteps: job.agentReasoningSteps ?? [],
+            ...(Object.keys(statuses).length > 0 ? { stepStatuses: statuses } : {}),
+          }
           if (job.status !== "completed" && job.status !== "failed") return { ...prev, [jobVideoId]: next }
           activeJobVideoIdRef.current = null
           const stepIndex = job.stepIndex
-          const wf = current.workflow
           if (job.status === "completed") {
             const idx = stepIndex ?? (wf?.modules.length ?? 0) - 1
             const stepOutputUrls = idx >= 0 && job.outputUrl ? { ...current.stepOutputUrls, [idx]: job.outputUrl } : current.stepOutputUrls
             const stepOutputContentTypes = idx >= 0 && job.outputContentType ? { ...current.stepOutputContentTypes, [idx]: job.outputContentType } : current.stepOutputContentTypes
-            const statuses: Record<number, StepStatus> = {}
+            const stepRemotionSceneUrls = idx >= 0 && job.remotionSceneUrl ? { ...(current.stepRemotionSceneUrls ?? {}), [idx]: job.remotionSceneUrl } : (current.stepRemotionSceneUrls ?? {})
+            // Start from current statuses so steps outside this run keep their "done" state
+            const completedStatuses: Record<number, StepStatus> = { ...current.stepStatuses }
             const endIdx = stepIndex != null ? stepIndex + 1 : (wf?.modules.length ?? 0)
-            for (let i = 0; i < endIdx; i++) statuses[i] = "done"
-            return { ...prev, [jobVideoId]: { ...next, activeJobId: null, runningAll: false, jobProgress: 100, stepOutputUrls, stepOutputContentTypes, stepStatuses: statuses } }
+            for (let i = 0; i < endIdx; i++) completedStatuses[i] = "done"
+            const lastTotalTokenUsage = job.totalTokenUsage && job.totalTokenUsage.total_tokens > 0 ? job.totalTokenUsage : null
+            const lastTotalCostUsd = typeof job.totalCostUsd === 'number' && job.totalCostUsd > 0 ? job.totalCostUsd : null
+            const lastTotalExecutionTimeMs = typeof job.totalExecutionTimeMs === 'number' && job.totalExecutionTimeMs > 0 ? job.totalExecutionTimeMs : null
+            return { ...prev, [jobVideoId]: { ...next, activeJobId: null, runningAll: false, jobProgress: 100, stepOutputUrls, stepOutputContentTypes, stepRemotionSceneUrls, stepStatuses: completedStatuses, lastTotalTokenUsage, lastTotalCostUsd, lastTotalExecutionTimeMs } }
           }
           const failedIdx = job.stepResults?.findIndex((s: { success: boolean }) => !s.success) ?? stepIndex ?? 0
-          const statuses: Record<number, StepStatus> = {}
-          for (let i = 0; i < (wf?.modules.length ?? 0); i++) statuses[i] = i < failedIdx ? "done" : i === failedIdx ? "error" : "pending"
-          return { ...prev, [jobVideoId]: { ...next, activeJobId: null, runningAll: false, stepStatuses: statuses } }
+          // Clear outputUrl for the failed step so it won't be treated as "done" on reload
+          const failedStepOutputUrls = { ...current.stepOutputUrls }
+          const failedStepOutputContentTypes = { ...current.stepOutputContentTypes }
+          const failedStepRemotionSceneUrls = { ...(current.stepRemotionSceneUrls ?? {}) }
+          if (failedIdx >= 0) {
+            delete (failedStepOutputUrls as Record<number, string>)[failedIdx]
+            delete (failedStepOutputContentTypes as Record<number, string>)[failedIdx]
+            delete (failedStepRemotionSceneUrls as Record<number, string>)[failedIdx]
+          }
+          // Preserve "done" for steps that have outputs and weren't part of this failed run
+          const failedStatuses: Record<number, StepStatus> = { ...current.stepStatuses }
+          for (let i = 0; i < (wf?.modules.length ?? 0); i++) {
+            if (i < failedIdx) {
+              failedStatuses[i] = "done"
+            } else if (i === failedIdx) {
+              failedStatuses[i] = "error"
+            } else {
+              // Keep "done" if the step has an existing output, otherwise "pending"
+              failedStatuses[i] = failedStepOutputUrls[i] ? "done" : "pending"
+            }
+          }
+          return { ...prev, [jobVideoId]: { ...next, activeJobId: null, runningAll: false, stepStatuses: failedStatuses, stepOutputUrls: failedStepOutputUrls, stepOutputContentTypes: failedStepOutputContentTypes, stepRemotionSceneUrls: failedStepRemotionSceneUrls } }
         })
         if (job.status === "completed") addLog("Workflow step completed", "info", jobVideoId)
         else if (job.status === "failed") addLog(`Failed: ${job.error}`, "error", jobVideoId)
@@ -338,7 +430,7 @@ export function WorkflowEditor() {
         // ignore
       }
     },
-    [addLog]
+    [addLog, fetchLogsForVideo]
   )
 
   useEffect(() => {
@@ -346,6 +438,59 @@ export function WorkflowEditor() {
     const interval = setInterval(() => pollJob(activeJobId), 500)
     return () => clearInterval(interval)
   }, [activeJobId, pollJob])
+
+  // Save to cache immediately when a job finishes (activeJobId → null) to avoid
+  // race condition where beforeunload fires before React re-renders the ref.
+  const prevActiveJobIdRef = useRef<string | null>(null)
+  useEffect(() => {
+    const prev = prevActiveJobIdRef.current
+    prevActiveJobIdRef.current = activeJobId ?? null
+    if (prev !== null && activeJobId === null && projectId && videoId) {
+      const state = stateByVideo[videoId]
+      if (state) saveToCache(projectId, videoId, state)
+    }
+  }, [activeJobId, projectId, videoId, stateByVideo])
+
+  useEffect(() => {
+    if (!projectId || !videoId) return
+    let cancelled = false
+    fetch(`/api/projects/${projectId}/videos/${videoId}/workflow-cache/metadata`, { credentials: "include" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: {
+        metadata?: Record<string, { executionTimeMs?: number; costUsd?: number }>
+        lastRun?: { totalTokenUsage?: TokenUsage; totalCostUsd?: number; totalExecutionTimeMs?: number }
+      } | null) => {
+        if (cancelled || !data) return
+        setStepMetadataByModuleId(data.metadata ?? {})
+        if (data.lastRun) {
+          const lr = data.lastRun
+          const lastTotalTokenUsage = lr.totalTokenUsage && lr.totalTokenUsage.total_tokens > 0 ? lr.totalTokenUsage : null
+          const lastTotalCostUsd = typeof lr.totalCostUsd === "number" && lr.totalCostUsd > 0 ? lr.totalCostUsd : null
+          const lastTotalExecutionTimeMs = typeof lr.totalExecutionTimeMs === "number" && lr.totalExecutionTimeMs > 0 ? lr.totalExecutionTimeMs : null
+          updateVideoState(videoId, { lastTotalTokenUsage, lastTotalCostUsd, lastTotalExecutionTimeMs })
+        }
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [projectId, videoId, stepStatuses, lastTotalExecutionTimeMs, lastTotalCostUsd, updateVideoState])
+
+  useEffect(() => {
+    if (!setAgentOverlay) return
+    const isAgentStep =
+      activeJobId &&
+      workflow &&
+      jobStepIndex != null &&
+      workflow.modules[jobStepIndex]?.type === "llm.agent"
+    if (isAgentStep) {
+      setAgentOverlay({
+        visible: true,
+        reasoningSteps: jobAgentReasoningSteps,
+        jobMessage: jobMessage || "Agent thinking...",
+      })
+    } else {
+      setAgentOverlay(null)
+    }
+  }, [activeJobId, workflow, jobStepIndex, jobAgentReasoningSteps, jobMessage, setAgentOverlay])
 
   const loadWorkflow = useCallback(
     async (id: string) => {
@@ -364,6 +509,26 @@ export function WorkflowEditor() {
     },
     [addLog, videoId, updateVideoState]
   )
+
+  /** Restore active job on page reload when backend has a running job for this video */
+  useEffect(() => {
+    if (!projectId || !videoId) return
+    let cancelled = false
+    fetch(`/api/projects/${projectId}/active-workflow-jobs`, { credentials: "include" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { jobs?: { videoId: string; jobId: string; workflowId?: string }[] } | null) => {
+        if (cancelled || !data?.jobs) return
+        const job = data.jobs.find((j) => j.videoId === videoId)
+        if (!job) return
+        activeJobVideoIdRef.current = videoId
+        updateVideoState(videoId, { activeJobId: job.jobId, runningAll: true })
+        if (job.workflowId) {
+          loadWorkflow(job.workflowId)
+        }
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [projectId, videoId, updateVideoState, loadWorkflow])
 
   const saveWorkflow = useCallback(
     async (id: string) => {
@@ -747,8 +912,55 @@ export function WorkflowEditor() {
   const getModuleLabel = (type: string) =>
     moduleTypes.find((m) => m.type === type)?.label ?? type
 
-  const handlePreview = (url: string, label: string, contentType?: string) => {
-    setPreviewVideo({ url, label, contentType: contentType ?? "video/mp4" })
+  const handlePreview = (url: string, label: string, contentType?: string, moduleType?: string, remotionSceneUrl?: string) => {
+    const base = { url, label, contentType: contentType ?? "video/mp4" }
+    const sceneUrl = remotionSceneUrl ?? (moduleType === "video.render.remotion" && url.includes("/file?") ? url.replace(/path=[^&]+/, "path=scene.json") : undefined)
+    setPreviewVideo(sceneUrl ? { ...base, remotionSceneUrl: sceneUrl } : base)
+  }
+
+  const handleRemotionScenePreview = (idx: number) => {
+    if (!workflow) return
+    const mod = workflow.modules[idx]
+    const modParams = mod.params ?? {}
+    const sceneSource = String(modParams.sceneSource ?? "variable")
+
+    if (sceneSource === "inline") {
+      const jsonStr = String(modParams.sceneJsonInline ?? "").trim()
+      if (!jsonStr) {
+        addLog("Inline JSON is empty. Enter scene JSON in the Inline JSON field.", "warn", videoId ?? undefined)
+        return
+      }
+      try {
+        const sceneData = JSON.parse(jsonStr) as Record<string, unknown>
+        setPreviewVideo({
+          url: "",
+          label: "Remotion Scene Preview",
+          contentType: "application/json",
+          inlineRemotionScene: sceneData,
+        })
+      } catch {
+        addLog("Invalid JSON in Scene JSON field — check the syntax.", "error", videoId ?? undefined)
+      }
+    } else {
+      const sceneVar = mod.inputs?.scene
+      if (!sceneVar) {
+        addLog("No scene variable connected. Set the Scene JSON input.", "warn", videoId ?? undefined)
+        return
+      }
+      const sourceIdx = workflow.modules.findIndex(
+        (m, i) => i < idx && m.outputs && Object.values(m.outputs).includes(sceneVar)
+      )
+      if (sourceIdx >= 0 && stepOutputUrls[sourceIdx]) {
+        setPreviewVideo({
+          url: stepOutputUrls[sourceIdx],
+          label: "Remotion Scene Preview",
+          contentType: "application/json",
+          remotionSceneUrl: stepOutputUrls[sourceIdx],
+        })
+      } else {
+        addLog("Run the source step first to generate scene JSON for preview.", "warn", videoId ?? undefined)
+      }
+    }
   }
 
   const handleOpenCrop = (index: number) => {
@@ -856,15 +1068,33 @@ export function WorkflowEditor() {
         </div>
       </div>
 
+      {(lastTotalExecutionTimeMs != null && lastTotalExecutionTimeMs > 0) || (lastTotalCostUsd != null && lastTotalCostUsd > 0) ? (
+        <div className="px-4 py-2.5 bg-primary/5 border-b border-primary/10 shrink-0 flex items-center gap-6">
+          <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Last run</span>
+          {lastTotalExecutionTimeMs != null && lastTotalExecutionTimeMs > 0 && (
+            <div className="flex items-center gap-1.5">
+              <Clock className="h-4 w-4 text-muted-foreground" />
+              <span className="text-sm font-semibold text-foreground">{(lastTotalExecutionTimeMs / 1000).toFixed(1)}s</span>
+            </div>
+          )}
+          {lastTotalCostUsd != null && lastTotalCostUsd > 0 && (
+            <div className="flex items-center gap-1.5">
+              <DollarSign className="h-4 w-4 text-muted-foreground" />
+              <span className="text-sm font-semibold text-foreground">${lastTotalCostUsd.toFixed(4)}</span>
+            </div>
+          )}
+        </div>
+      ) : null}
+
       <div className="flex-1 overflow-y-auto p-4 space-y-3">
         {workflow && (
           <>
-            {showProgress && (activeJobId || jobLogs.length > 0) && (
+            {(showProgress && activeJobId) || lastTotalTokenUsage || lastTotalCostUsd || lastTotalExecutionTimeMs ? (
               <div className="rounded-lg border bg-muted/40 p-3 space-y-2.5 shadow-sm">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="font-medium">{jobMessage || "Running..."}</span>
-                  <div className="flex items-center gap-2">
-                    {activeJobId && (
+                {activeJobId && (
+                  <div className="flex items-center justify-between text-xs gap-2">
+                    <span className="font-medium truncate">{jobMessage || "Running..."}</span>
+                    <div className="flex items-center gap-2 shrink-0">
                       <Button
                         type="button"
                         variant="outline"
@@ -879,23 +1109,33 @@ export function WorkflowEditor() {
                       >
                         Cancel
                       </Button>
-                    )}
-                    {activeJobId && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />}
+                      <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+                    </div>
                   </div>
-                </div>
-                <div className="h-2 bg-muted rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-primary transition-all duration-300 rounded-full"
-                    style={{ width: `${jobProgress}%` }}
-                  />
-                </div>
-                <div className="max-h-24 overflow-y-auto font-mono text-[10px] text-muted-foreground space-y-0.5 rounded bg-background/50 px-2 py-1.5">
-                  {jobLogs.map((line, i) => (
-                    <div key={i}>{line}</div>
-                  ))}
-                </div>
+                )}
+                {activeJobId && (
+                  <div className="h-2 bg-muted rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-primary transition-all duration-300 rounded-full"
+                      style={{ width: `${jobProgress}%` }}
+                    />
+                  </div>
+                )}
+                {((lastTotalTokenUsage?.total_tokens ?? 0) > 0 || (lastTotalCostUsd != null && lastTotalCostUsd > 0) || (lastTotalExecutionTimeMs != null && lastTotalExecutionTimeMs > 0)) && (
+                  <div className="text-xs text-muted-foreground pt-1 border-t space-y-0.5">
+                    {lastTotalExecutionTimeMs != null && lastTotalExecutionTimeMs > 0 && (
+                      <div>Execution time: {(lastTotalExecutionTimeMs / 1000).toFixed(1)}s</div>
+                    )}
+                    {lastTotalTokenUsage && lastTotalTokenUsage.total_tokens > 0 && (
+                      <div>Total tokens: {lastTotalTokenUsage.prompt_tokens} prompt + {lastTotalTokenUsage.completion_tokens} completion = {lastTotalTokenUsage.total_tokens} total</div>
+                    )}
+                    {lastTotalCostUsd != null && lastTotalCostUsd > 0 && (
+                      <div className="font-medium text-foreground">Estimated cost: ${lastTotalCostUsd.toFixed(4)}</div>
+                    )}
+                  </div>
+                )}
               </div>
-            )}
+            ) : null}
             <div className="flex items-center justify-between px-1">
               <span className="text-sm font-medium text-muted-foreground">
                 {workflow.name} · {workflow.modules.length} {workflow.modules.length === 1 ? "module" : "modules"}
@@ -923,7 +1163,9 @@ export function WorkflowEditor() {
                   index={idx}
                   moduleTypes={moduleTypes}
                   status={stepStatuses[idx] ?? "pending"}
+                  stepMetadata={stepMetadataByModuleId[mod.id]}
                   outputUrl={stepOutputUrls[idx]}
+                  remotionSceneUrl={stepRemotionSceneUrls[idx]}
                   expanded={expandedModuleIndex === idx}
                   onToggleExpand={() => setExpandedModuleIndex((i) => (i === idx ? null : idx))}
                   onRemove={() => removeModule(idx)}
@@ -935,7 +1177,12 @@ export function WorkflowEditor() {
                   onRenameVariable={renameVariableInWorkflow}
                   onRunStep={() => runStep(idx)}
                   onClearCache={() => clearModuleCache(idx)}
-                  onPreview={() => stepOutputUrls[idx] && handlePreview(stepOutputUrls[idx], `Step ${idx + 1}`, stepOutputContentTypes[idx])}
+                  onPreview={() => stepOutputUrls[idx] && handlePreview(stepOutputUrls[idx], `Step ${idx + 1}`, stepOutputContentTypes[idx], mod.type, stepRemotionSceneUrls[idx])}
+                  onScenePreview={
+                    mod.type === "video.render.remotion"
+                      ? () => handleRemotionScenePreview(idx)
+                      : undefined
+                  }
                   getModuleLabel={getModuleLabel}
                   getAvailableVariables={() => getAvailableVariablesForModule(idx)}
                   getAvailableVariablesByKind={(kind) => getAvailableVariablesByKindForModule(idx, kind)}
@@ -1012,6 +1259,7 @@ function ModuleBlock({
   index,
   moduleTypes,
   status,
+  stepMetadata,
   outputUrl,
   expanded,
   onToggleExpand,
@@ -1025,6 +1273,8 @@ function ModuleBlock({
   onRunStep,
   onClearCache,
   onPreview,
+  onScenePreview,
+  remotionSceneUrl,
   getModuleLabel,
   getAvailableVariables,
   getAvailableVariablesByKind,
@@ -1035,6 +1285,7 @@ function ModuleBlock({
   index: number
   moduleTypes: ModuleMeta[]
   status: StepStatus
+  stepMetadata?: { executionTimeMs?: number; costUsd?: number }
   outputUrl?: string
   expanded: boolean
   onToggleExpand: () => void
@@ -1048,6 +1299,8 @@ function ModuleBlock({
   onRunStep: () => void
   onClearCache: () => void
   onPreview: () => void
+  onScenePreview?: () => void
+  remotionSceneUrl?: string
   getModuleLabel: (type: string) => string
   getAvailableVariables: () => string[]
   getAvailableVariablesByKind: (kind: string) => string[]
@@ -1057,35 +1310,98 @@ function ModuleBlock({
   const meta = moduleTypes.find((m) => m.type === module.type)
   const params = module.params ?? {}
   const paramsSchema = meta?.paramsSchema ?? []
-  const paramsToShow = expanded ? paramsSchema : []
+  const paramsToShow = expanded
+    ? paramsSchema.filter((p) => {
+        if (module.type === "video.render.remotion") {
+          if (p.key === "sceneSource") return false
+          if (p.key === "sceneJsonInline") return false
+        }
+        return true
+      })
+    : []
   const outputFocusValueRef = useRef<Record<string, string>>({})
 
   const StatusIcon = () => {
-    if (status === "running") return <Loader2 className="h-3.5 w-3.5 animate-spin" />
-    if (status === "done") return <Check className="h-3.5 w-3.5 text-green-600" />
+    if (status === "running") return <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+    if (status === "done") return <Check className="h-3.5 w-3.5 text-green-600 dark:text-green-500" />
     if (status === "error") return <XCircle className="h-3.5 w-3.5 text-destructive" />
-    return <span className="w-3.5 h-3.5 rounded-full border border-muted-foreground/50" />
+    return <span className="w-3.5 h-3.5 rounded-full border-2 border-muted-foreground/40 bg-transparent" title="Pending" />
   }
 
-  const renderParam = (p: { key: string; label: string; type: string; default?: unknown; min?: number; max?: number; options?: { value: string; label: string }[] }) => (
-    <div key={p.key} className="flex items-center gap-2">
-      <label className="text-xs text-muted-foreground w-20 shrink-0">{p.label}</label>
+  const statusStyles = {
+    done: "border-l-4 border-l-green-500 bg-green-500/5 dark:bg-green-500/10",
+    running: "border-l-4 border-l-primary bg-primary/5 dark:bg-primary/10",
+    error: "border-l-4 border-l-destructive bg-destructive/5 dark:bg-destructive/10",
+    pending: "border-l-4 border-l-muted/50",
+  }
+
+  const renderParam = (p: { key: string; label: string; type: string; default?: unknown; min?: number; max?: number; options?: { value: string; label: string }[] }) => {
+    const promptVal = String(params[p.key] ?? p.default ?? "")
+    const isPureVariable = /^\{\{([A-Za-z0-9_]+)\}\}$/.test(promptVal.trim())
+    const textVars = getAvailableVariablesByKind("text")
+
+    return (
+    <div key={p.key} className={`flex ${p.type === "json" ? "items-start" : "items-center"} gap-2`}>
+      <label className={`text-xs text-muted-foreground w-20 shrink-0 ${p.type === "json" ? "pt-1.5" : ""}`}>{p.label}</label>
+      {p.type === "json" && (
+        <textarea
+          className="h-32 rounded-md border border-input bg-background px-2 py-1.5 text-xs flex-1 font-mono resize-y min-h-[80px]"
+          value={String(params[p.key] ?? p.default ?? "")}
+          onChange={(e) => onParamsChange({ ...params, [p.key]: e.target.value })}
+          placeholder='{"clips": [], "fps": 30, "width": 1920, "height": 1080}'
+          spellCheck={false}
+        />
+      )}
       {p.type === "prompt" && (
         <div className="flex-1 flex items-center gap-2 min-w-0">
-          <span className="text-xs text-muted-foreground truncate flex-1 min-w-0">
-            {(String(params[p.key] ?? p.default ?? "") || "Empty").slice(0, 60)}
-            {(String(params[p.key] ?? p.default ?? "").length > 60) ? "…" : ""}
-          </span>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="h-7 shrink-0"
-            onClick={() => onOpenPromptBuilder?.(p.key)}
-          >
-            <Pencil className="h-3 w-3 mr-1" />
-            Edit
-          </Button>
+          <div className="flex rounded-md border border-input overflow-hidden shrink-0">
+            <button
+              type="button"
+              className={`px-2.5 py-1 text-xs ${!isPureVariable ? "bg-primary text-primary-foreground" : "bg-muted/50 text-muted-foreground hover:bg-muted"}`}
+              onClick={() => onParamsChange({ ...params, [p.key]: "" })}
+            >
+              Manual
+            </button>
+            <button
+              type="button"
+              className={`px-2.5 py-1 text-xs ${isPureVariable ? "bg-primary text-primary-foreground" : "bg-muted/50 text-muted-foreground hover:bg-muted"}`}
+              onClick={() => {
+                const first = textVars[0]
+                onParamsChange({ ...params, [p.key]: first ? `{{${first}}}` : "" })
+              }}
+            >
+              Variable
+            </button>
+          </div>
+          {isPureVariable ? (
+            <select
+              className="h-7 rounded-md border border-input bg-background px-2 text-xs flex-1"
+              value={promptVal.match(/\{\{([A-Za-z0-9_]+)\}\}/)?.[1] ?? ""}
+              onChange={(e) => onParamsChange({ ...params, [p.key]: e.target.value ? `{{${e.target.value}}}` : "" })}
+            >
+              <option value="">— Select —</option>
+              {textVars.map((v) => (
+                <option key={v} value={v}>{v}</option>
+              ))}
+            </select>
+          ) : (
+            <>
+              <span className="text-xs text-muted-foreground truncate flex-1 min-w-0">
+                {(promptVal || "Empty").slice(0, 50)}
+                {(promptVal.length > 50) ? "…" : ""}
+              </span>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-7 shrink-0"
+                onClick={() => onOpenPromptBuilder?.(p.key)}
+              >
+                <Pencil className="h-3 w-3 mr-1" />
+                Edit
+              </Button>
+            </>
+          )}
         </div>
       )}
       {p.type === "number" && (() => {
@@ -1141,9 +1457,10 @@ function ModuleBlock({
       )}
     </div>
   )
+  }
 
   return (
-    <div className={`rounded-lg border bg-panel-3 text-sm transition-colors ${expanded ? "p-3 shadow-sm" : "px-3 py-2"}`}>
+    <div className={`rounded-lg border bg-panel-3 text-sm transition-all duration-200 ${expanded ? "p-3 shadow-sm" : "px-3 py-2"} ${statusStyles[status]}`}>
       <div className={`flex items-center justify-between gap-2 ${expanded ? "mb-3" : ""}`}>
         <div
           className="flex items-center gap-2.5 min-w-0 flex-1 cursor-pointer group"
@@ -1165,10 +1482,32 @@ function ModuleBlock({
             )}
           </button>
           <StatusIcon />
-          <span className="font-medium truncate">{getModuleLabel(module.type)}</span>
+          <span className={`font-medium truncate ${status === "pending" ? "text-muted-foreground" : ""}`}>{getModuleLabel(module.type)}</span>
           <span className="text-xs text-muted-foreground tabular-nums">#{index + 1}</span>
+          {status === "running" && <span className="text-xs text-primary font-medium">Running…</span>}
+          {stepMetadata && (stepMetadata.executionTimeMs != null || stepMetadata.costUsd != null) && (
+            <span className="text-xs text-muted-foreground ml-auto flex items-center gap-2 shrink-0">
+              {stepMetadata.executionTimeMs != null && stepMetadata.executionTimeMs > 0 && (
+                <span className="flex items-center gap-1" title="Execution time">
+                  <Clock className="h-3 w-3" />
+                  {(stepMetadata.executionTimeMs / 1000).toFixed(1)}s
+                </span>
+              )}
+              {stepMetadata.costUsd != null && stepMetadata.costUsd > 0 && (
+                <span className="flex items-center gap-1" title="Cost">
+                  <DollarSign className="h-3 w-3" />
+                  ${stepMetadata.costUsd.toFixed(4)}
+                </span>
+              )}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-0.5 shrink-0">
+          {onScenePreview && (
+            <Button variant="ghost" size="icon" className="h-6 w-6" onClick={onScenePreview} title="Preview scene JSON in Remotion player">
+              <Clapperboard className="h-3 w-3" />
+            </Button>
+          )}
           {outputUrl && (
             <Button variant="ghost" size="icon" className="h-6 w-6" onClick={onPreview} title="Preview result">
               <Eye className="h-3 w-3" />
@@ -1240,7 +1579,55 @@ function ModuleBlock({
               }
             }
 
-            return slots.map((slot) => (
+            return slots.map((slot) => {
+              if (module.type === "video.render.remotion" && slot.key === "scene") {
+                const sceneSource = String(params.sceneSource ?? "variable")
+                return (
+                  <div key={slot.key} className="flex items-start gap-2">
+                    <label className="text-xs text-muted-foreground w-20 shrink-0 pt-1.5">{slot.label}</label>
+                    <div className="flex-1 flex flex-col gap-1.5">
+                      <div className="flex rounded-md border border-input overflow-hidden w-fit shrink-0">
+                        <button
+                          type="button"
+                          className={`px-2.5 py-1 text-xs ${sceneSource === "variable" ? "bg-primary text-primary-foreground" : "bg-muted/50 text-muted-foreground hover:bg-muted"}`}
+                          onClick={() => onParamsChange({ ...params, sceneSource: "variable" })}
+                        >
+                          Variable
+                        </button>
+                        <button
+                          type="button"
+                          className={`px-2.5 py-1 text-xs ${sceneSource === "inline" ? "bg-primary text-primary-foreground" : "bg-muted/50 text-muted-foreground hover:bg-muted"}`}
+                          onClick={() => onParamsChange({ ...params, sceneSource: "inline" })}
+                        >
+                          Inline JSON
+                        </button>
+                      </div>
+                      {sceneSource === "variable" ? (
+                        <select
+                          className="h-7 rounded-md border border-input bg-background px-2 text-xs flex-1"
+                          value={module.inputs?.[slot.key] ?? ""}
+                          onChange={(e) => onInputsChange({ ...(module.inputs ?? {}), [slot.key]: e.target.value })}
+                        >
+                          <option value="">— None —</option>
+                          {getAvailableVariablesByKind(slot.kind).map((v) => (
+                            <option key={v} value={v}>({v})</option>
+                          ))}
+                        </select>
+                      ) : (
+                        <textarea
+                          className="h-36 rounded-md border border-input bg-background px-2 py-1.5 text-xs font-mono resize-y min-h-[80px]"
+                          value={String(params.sceneJsonInline ?? "")}
+                          onChange={(e) => onParamsChange({ ...params, sceneJsonInline: e.target.value })}
+                          placeholder='{"clips": [], "fps": 30, "width": 1920, "height": 1080}'
+                          spellCheck={false}
+                        />
+                      )}
+                    </div>
+                  </div>
+                )
+              }
+
+              return (
               <div key={slot.key} className="flex items-center gap-2">
                 <label className="text-xs text-muted-foreground w-20 shrink-0">{slot.label}</label>
                 <div className="flex-1 flex items-center gap-1.5">
@@ -1281,7 +1668,8 @@ function ModuleBlock({
                   )}
                 </div>
               </div>
-            ))
+              )
+            })
           })()}
         </div>
       )}

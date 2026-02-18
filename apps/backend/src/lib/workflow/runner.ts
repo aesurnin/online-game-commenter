@@ -5,8 +5,66 @@ import type { WorkflowDefinition, WorkflowContext, WorkflowModuleDef } from './t
 import { getModule } from './registry.js';
 import { getObjectFromR2 } from '../r2.js';
 import { resolveWorkflowVariables } from './variable-resolver.js';
+import { ensurePricingLoaded, calculateCost } from './openrouter-pricing.js';
 
 const MODULE_ID_FILE = '.module-id';
+const METADATA_FILE = 'metadata.json';
+
+interface TokenUsageData {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens?: number;
+}
+
+interface ModuleMetadata {
+  tokenUsage?: TokenUsageData;
+  model?: string;
+  /** Direct cost in USD. Modules (ElevenLabs, etc.) that don't use tokens write this themselves. */
+  costUsd?: number;
+}
+
+async function readModuleMetadata(cacheDir: string): Promise<ModuleMetadata | null> {
+  try {
+    const p = path.join(cacheDir, METADATA_FILE);
+    const data = await fs.readFile(p, 'utf8');
+    const parsed = JSON.parse(data) as { tokenUsage?: TokenUsageData; model?: string; costUsd?: number };
+    const hasTokenUsage = parsed?.tokenUsage && typeof parsed.tokenUsage.prompt_tokens === 'number' && typeof parsed.tokenUsage.completion_tokens === 'number';
+    const hasCostUsd = typeof parsed?.costUsd === 'number' && parsed.costUsd > 0;
+    if (!hasTokenUsage && !hasCostUsd) return null;
+    const result: ModuleMetadata = {};
+    if (hasTokenUsage) {
+      const u = parsed!.tokenUsage!;
+      result.tokenUsage = {
+        prompt_tokens: u.prompt_tokens,
+        completion_tokens: u.completion_tokens,
+        total_tokens: u.total_tokens ?? u.prompt_tokens + u.completion_tokens,
+      };
+      result.model = typeof parsed.model === 'string' ? parsed.model : undefined;
+    }
+    if (hasCostUsd) result.costUsd = parsed!.costUsd!;
+    return result;
+  } catch {
+    /* no metadata or invalid */
+  }
+  return null;
+}
+
+async function writeExecutionTimeToMetadata(cacheDir: string, executionTimeMs: number): Promise<void> {
+  try {
+    const p = path.join(cacheDir, METADATA_FILE);
+    let data: Record<string, unknown> = {};
+    try {
+      const raw = await fs.readFile(p, 'utf8');
+      data = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      /* no file or invalid, start fresh */
+    }
+    data.executionTimeMs = executionTimeMs;
+    await fs.writeFile(p, JSON.stringify(data, null, 2), 'utf8');
+  } catch {
+    /* ignore */
+  }
+}
 
 function getWorkflowCacheBase(): string {
   const base = process.env.WORKFLOW_CACHE_BASE;
@@ -52,6 +110,37 @@ export async function ensureWorkflowModuleCacheDirs(
     const dir = path.join(videoDir, folderName);
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(path.join(dir, MODULE_ID_FILE), moduleId, 'utf8');
+  }
+}
+
+/** Read metadata.json from a workflow cache folder. Returns null if missing or invalid. */
+export async function readWorkflowModuleMetadata(
+  projectId: string,
+  videoId: string,
+  folderName: string
+): Promise<{ executionTimeMs?: number; costUsd?: number; tokenUsage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number }; model?: string } | null> {
+  const cacheBase = getWorkflowCacheBase();
+  const p = path.join(cacheBase, projectId, videoId, folderName, METADATA_FILE);
+  try {
+    const raw = await fs.readFile(p, 'utf8');
+    const data = JSON.parse(raw) as Record<string, unknown>;
+    const result: { executionTimeMs?: number; costUsd?: number; tokenUsage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number }; model?: string } = {};
+    if (typeof data.executionTimeMs === 'number' && data.executionTimeMs > 0) result.executionTimeMs = data.executionTimeMs;
+    if (typeof data.costUsd === 'number' && data.costUsd > 0) result.costUsd = data.costUsd;
+    if (data.tokenUsage && typeof data.tokenUsage === 'object') {
+      const u = data.tokenUsage as { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+      if (typeof u.prompt_tokens === 'number' && typeof u.completion_tokens === 'number') {
+        result.tokenUsage = {
+          prompt_tokens: u.prompt_tokens,
+          completion_tokens: u.completion_tokens,
+          total_tokens: u.total_tokens ?? u.prompt_tokens + u.completion_tokens,
+        };
+      }
+    }
+    if (typeof data.model === 'string') result.model = data.model;
+    return Object.keys(result).length > 0 ? result : null;
+  } catch {
+    return null;
   }
 }
 
@@ -197,10 +286,20 @@ export interface RunOptions {
   /** Callbacks for progress/logging during async run */
   onProgress?: (percent: number, message: string) => void;
   onLog?: (message: string) => void;
+  /** Called when starting each step (0-based index) - allows UI to show current step */
+  onStepStart?: (stepIndex: number) => void;
+  /** Stream agent reasoning steps (llm.agent module) */
+  onAgentReasoning?: (content: string) => void;
   /** Called periodically to check if execution should be aborted */
   onCheckCancel?: () => boolean;
   /** Optional: abort signal to stop long-running operations */
   signal?: AbortSignal;
+}
+
+export interface TokenUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
 }
 
 export interface RunResult {
@@ -210,6 +309,12 @@ export interface RunResult {
   stepResults?: { index: number; moduleId: string; success: boolean; error?: string }[];
   /** When the last run step produced a text file (e.g. OpenRouter); worker uses this to set outputUrl to cache file URL */
   lastStepOutput?: { kind: 'text'; path: string; cacheFolderName: string; relativePath: string };
+  /** Aggregated token usage from all paid-API modules (llm-agent, openrouter-vision, etc.) */
+  totalTokenUsage?: TokenUsage;
+  /** Estimated cost in USD based on OpenRouter pricing */
+  totalCostUsd?: number;
+  /** Total execution time in milliseconds across all steps */
+  totalExecutionTimeMs?: number;
 }
 
 /** Download video from R2 to local temp and return path */
@@ -225,7 +330,7 @@ export async function downloadVideoToTemp(
 }
 
 export async function runWorkflow(options: RunOptions): Promise<RunResult> {
-  const { projectId, videoId, sourceVideoKey, workflow, stepIndex, previousContext, onProgress, onLog, onCheckCancel, signal } = options;
+  const { projectId, videoId, sourceVideoKey, workflow, stepIndex, previousContext, onProgress, onLog, onAgentReasoning, onStepStart, onCheckCancel, signal } = options;
   const tempDir = previousContext?.tempDir ?? await fs.mkdtemp(path.join(os.tmpdir(), 'workflow-'));
   const modules = workflow.modules;
 
@@ -285,12 +390,18 @@ export async function runWorkflow(options: RunOptions): Promise<RunResult> {
 
   const stepResults: RunResult['stepResults'] = [];
   let lastStepOutput: RunResult['lastStepOutput'];
+  const totalTokenUsage: TokenUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+  let totalCostUsd = 0;
+  let totalExecutionTimeMs = 0;
+
+  await ensurePricingLoaded();
 
   for (let i = startIdx; i < endIdx; i++) {
     if (onCheckCancel?.()) {
       onLog?.('Workflow cancelled by user');
       return { success: false, error: 'Cancelled by user', context, stepResults };
     }
+    onStepStart?.(i);
     const def = modules[i];
     const mod = getModule(def.type);
     if (!mod) {
@@ -317,6 +428,8 @@ export async function runWorkflow(options: RunOptions): Promise<RunResult> {
     }
 
     const stepNum = i + 1;
+    const stepStartTime = Date.now();
+    context.onAgentReasoning = def.type === 'llm.agent' ? onAgentReasoning : undefined;
     context.inputPaths = {};
     if (def.inputs) {
       for (const [slotKey, varName] of Object.entries(def.inputs)) {
@@ -347,6 +460,9 @@ export async function runWorkflow(options: RunOptions): Promise<RunResult> {
       return { success: false, error: result.error, context, stepResults };
     }
 
+    const stepEndTime = Date.now();
+    const executionTimeMs = stepEndTime - stepStartTime;
+
     if (result.context) {
       if (result.context.currentVideoPath) {
         context.currentVideoPath = result.context.currentVideoPath;
@@ -368,15 +484,57 @@ export async function runWorkflow(options: RunOptions): Promise<RunResult> {
           };
         }
       }
+      const outputAudioVar = def.outputs?.audio;
+      if (outputAudioVar && result.context.currentAudioPath) {
+        variables[outputAudioVar] = result.context.currentAudioPath;
+      }
       if (result.context.variables) {
         Object.assign(variables, result.context.variables);
       }
       Object.assign(context, { ...result.context, variables: context.variables });
+    }
+
+    totalExecutionTimeMs += executionTimeMs;
+    await writeExecutionTimeToMetadata(moduleCacheDir, executionTimeMs);
+    onLog?.(`[Step ${stepNum}] Execution time: ${(executionTimeMs / 1000).toFixed(1)}s`);
+
+    const meta = await readModuleMetadata(moduleCacheDir);
+    if (meta) {
+      let stepCost = 0;
+      if (meta.costUsd != null && meta.costUsd > 0) {
+        stepCost = meta.costUsd;
+        totalCostUsd += stepCost;
+        onLog?.(`[Step ${stepNum}] Cost: $${stepCost.toFixed(4)} (module-reported)`);
+      } else if (meta.tokenUsage && (meta.tokenUsage.total_tokens ?? meta.tokenUsage.prompt_tokens + meta.tokenUsage.completion_tokens) > 0) {
+        const u = meta.tokenUsage;
+        const stepTotal = u.total_tokens ?? u.prompt_tokens + u.completion_tokens;
+        totalTokenUsage.prompt_tokens += u.prompt_tokens;
+        totalTokenUsage.completion_tokens += u.completion_tokens;
+        totalTokenUsage.total_tokens += stepTotal;
+        const modelId = meta.model ?? 'unknown';
+        stepCost = calculateCost(modelId, u.prompt_tokens, u.completion_tokens);
+        totalCostUsd += stepCost;
+        onLog?.(`[Step ${stepNum}] Token usage: +${stepTotal} (total: ${totalTokenUsage.total_tokens})${stepCost > 0 ? `, cost: $${stepCost.toFixed(4)}` : ''}`);
+      }
     }
     onLog?.(`[Step ${stepNum}] Completed`);
   }
 
   onProgress?.(100, 'Done');
   onLog?.('Workflow completed successfully');
-  return { success: true, context, stepResults, lastStepOutput };
+  if (totalTokenUsage.total_tokens > 0) {
+    onLog?.(`[Workflow] Total tokens: ${totalTokenUsage.prompt_tokens} prompt + ${totalTokenUsage.completion_tokens} completion = ${totalTokenUsage.total_tokens} total${totalCostUsd > 0 ? `, cost: $${totalCostUsd.toFixed(4)}` : ''}`);
+  }
+  if (totalExecutionTimeMs > 0) {
+    onLog?.(`[Workflow] Total execution time: ${(totalExecutionTimeMs / 1000).toFixed(1)}s`);
+  }
+  return {
+    success: true,
+    context,
+    stepResults,
+    lastStepOutput,
+    totalTokenUsage: totalTokenUsage.total_tokens > 0 ? totalTokenUsage : undefined,
+    totalCostUsd: totalCostUsd > 0 ? totalCostUsd : undefined,
+    totalExecutionTimeMs: totalExecutionTimeMs > 0 ? totalExecutionTimeMs : undefined,
+  };
 }

@@ -78,12 +78,16 @@ export interface WorkflowContext {
   moduleCacheDir?: string;
   /** Path to text output file (e.g. .txt/.md) produced by this module; used when output slot kind is 'text' */
   currentTextOutputPath?: string;
+  /** Path to audio output file (e.g. .mp3/.wav) produced by this module; used when output slot kind is 'file' (audio) */
+  currentAudioPath?: string;
   /** Optional: abort signal to stop long-running operations */
   signal?: AbortSignal;
   /** Optional: report progress (0-100) and message during module execution */
   onProgress?: (percent: number, message: string) => void;
   /** Optional: append log line */
   onLog?: (message: string) => void;
+  /** Optional: stream agent reasoning (llm.agent module only) */
+  onAgentReasoning?: (content: string) => void;
 }
 
 /** Result of running a single module */

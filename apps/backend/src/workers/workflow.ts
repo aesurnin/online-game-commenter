@@ -1,11 +1,16 @@
 import fs from 'fs/promises';
+import path from 'path';
 import { Worker, Job } from 'bullmq';
+import { eq } from 'drizzle-orm';
+import { db } from '../db/index.js';
+import { videoEntities } from '../db/schema/index.js';
 import { runWorkflow } from '../lib/workflow/runner.js';
 import { uploadToR2, getPresignedUrl } from '../lib/r2.js';
 import {
   createJob,
   updateJob,
   appendJobLog,
+  appendAgentReasoning,
   isCancelRequested,
   clearCancelRequest,
 } from '../lib/workflow-job-store.js';
@@ -59,10 +64,14 @@ async function processWorkflowJob(job: Job<WorkflowJobData>) {
         state.progress = pct;
         state.message = msg;
       },
+      onStepStart: (idx) => {
+        state.stepIndex = idx;
+      },
       onLog: (msg) => {
         appendJobLog(jobId, msg);
         appendVideoLog(videoId, msg);
       },
+      onAgentReasoning: (content) => appendAgentReasoning(jobId, content),
       onCheckCancel: () => isCancelRequested(jobId),
       signal: abortController.signal,
     });
@@ -84,7 +93,8 @@ async function processWorkflowJob(job: Job<WorkflowJobData>) {
       const pathEnc = encodeURIComponent(lastStep.relativePath);
       const folderEnc = encodeURIComponent(lastStep.cacheFolderName);
       const outputUrl = `/api/projects/${projectId}/videos/${videoId}/workflow-cache/${folderEnc}/file?path=${pathEnc}`;
-      const outputContentType = lastStep.relativePath.toLowerCase().endsWith('.md') ? 'text/markdown' : 'text/plain';
+      const ext = lastStep.relativePath.toLowerCase();
+      const outputContentType = ext.endsWith('.md') ? 'text/markdown' : ext.endsWith('.json') ? 'application/json' : 'text/plain';
       updateJob(jobId, { outputUrl, outputContentType });
     } else if (result.context?.currentVideoPath) {
       try {
@@ -93,7 +103,17 @@ async function processWorkflowJob(job: Job<WorkflowJobData>) {
         const key = `projects/${projectId}/videos/${videoId}/workflow-output/${suffix}`;
         await uploadToR2(key, buf, 'video/mp4');
         const outputUrl = await getPresignedUrl(key, 3600);
-        updateJob(jobId, { outputUrl });
+        const jobUpdates: { outputUrl: string; remotionSceneUrl?: string } = { outputUrl };
+
+        const idx = stepIndex ?? (workflow.modules?.length ?? 1) - 1;
+        const lastMod = workflow.modules?.[idx];
+        if (lastMod?.type === 'video.render.remotion') {
+          const cacheDir = path.dirname(result.context.currentVideoPath);
+          const folderName = path.basename(cacheDir);
+          const remotionSceneUrl = `/api/projects/${projectId}/videos/${videoId}/workflow-cache/${encodeURIComponent(folderName)}/file?path=${encodeURIComponent('scene.json')}`;
+          jobUpdates.remotionSceneUrl = remotionSceneUrl;
+        }
+        updateJob(jobId, jobUpdates);
       } catch (e) {
         const msg = `Upload failed: ${e}`;
         appendJobLog(jobId, msg);
@@ -105,7 +125,36 @@ async function processWorkflowJob(job: Job<WorkflowJobData>) {
       status: 'completed',
       progress: 100,
       stepResults: result.stepResults,
+      totalTokenUsage: result.totalTokenUsage,
+      totalCostUsd: result.totalCostUsd,
+      totalExecutionTimeMs: result.totalExecutionTimeMs,
     });
+
+    const hasCost = typeof result.totalCostUsd === 'number' && result.totalCostUsd > 0;
+    const hasTime = typeof result.totalExecutionTimeMs === 'number' && result.totalExecutionTimeMs > 0;
+    const hasTokens = result.totalTokenUsage && result.totalTokenUsage.total_tokens > 0;
+    if (hasCost || hasTime || hasTokens) {
+      try {
+        const [video] = await db.select().from(videoEntities).where(eq(videoEntities.id, videoId));
+        if (video) {
+          const meta = (video.metadata as Record<string, unknown>) || {};
+          await db.update(videoEntities)
+            .set({
+              metadata: {
+                ...meta,
+                workflowLastRun: {
+                  totalTokenUsage: hasTokens ? result.totalTokenUsage : undefined,
+                  totalCostUsd: hasCost ? result.totalCostUsd : undefined,
+                  totalExecutionTimeMs: hasTime ? result.totalExecutionTimeMs : undefined,
+                },
+              },
+            })
+            .where(eq(videoEntities.id, videoId));
+        }
+      } catch (e) {
+        console.error('[WorkflowWorker] Failed to save last run to video metadata:', e);
+      }
+    }
   } catch (err) {
     clearInterval(cancelCheckInterval);
     clearCancelRequest(jobId);

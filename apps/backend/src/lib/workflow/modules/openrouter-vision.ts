@@ -1,148 +1,13 @@
-import { spawn } from 'child_process';
 import fs from 'fs/promises';
 import path from 'path';
 import type { WorkflowContext, WorkflowModule, ModuleRunResult } from '../types.js';
-
-const OPENROUTER_BASE = 'https://openrouter.ai/api/v1/chat/completions';
-
-/** Placeholder format: {{variableName}}. Resolve with context.variables; for .txt/.md paths read file content. */
-async function resolvePromptPlaceholders(
-  template: string,
-  variables: Record<string, string>
-): Promise<string> {
-  const re = /\{\{([A-Za-z0-9_]+)\}\}/g;
-  const matches = [...template.matchAll(re)];
-  if (matches.length === 0) return template;
-
-  const resolved = await Promise.all(
-    matches.map(async (m) => {
-      const name = m[1];
-      const value = variables[name];
-      if (value === undefined || value === '') return m[0];
-      const ext = path.extname(value).toLowerCase();
-      if (ext === '.txt' || ext === '.md') {
-        try {
-          const content = await fs.readFile(value, 'utf8');
-          return content.trim();
-        } catch {
-          return `[file not found: ${name}]`;
-        }
-      }
-      return value;
-    })
-  );
-
-  let result = '';
-  let lastEnd = 0;
-  for (let i = 0; i < matches.length; i++) {
-    result += template.slice(lastEnd, matches[i].index);
-    result += resolved[i];
-    lastEnd = matches[i].index + matches[i][0].length;
-  }
-  result += template.slice(lastEnd);
-  return result;
-}
-
-/** Extract up to N frames from video at even intervals, return base64 JPEG buffers. */
-async function extractFrames(videoPath: string, count: number, durationSec: number, signal?: AbortSignal): Promise<string[]> {
-  const outDir = path.dirname(videoPath);
-  const prefix = path.join(outDir, `frame_${Date.now()}_`);
-  const pattern = `${prefix}%03d.jpg`;
-  const interval = durationSec > 0 ? durationSec / Math.max(1, count) : 1;
-
-  await new Promise<void>((resolve, reject) => {
-    const proc = spawn(
-      'ffmpeg',
-      [
-        '-y',
-        '-i', videoPath,
-        '-vf', `fps=1/${interval},scale=iw:min(720\\,ih):force_original_aspect_ratio=decrease`,
-        '-vframes', String(count),
-        '-f', 'image2',
-        pattern,
-      ],
-      { stdio: ['ignore', 'pipe', 'pipe'] }
-    );
-    
-    if (signal) {
-      if (signal.aborted) {
-        proc.kill();
-        return reject(new Error('Aborted'));
-      }
-      signal.addEventListener('abort', () => {
-        proc.kill();
-        reject(new Error('Aborted'));
-      }, { once: true });
-    }
-
-    proc.on('error', reject);
-    proc.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}`))));
-  });
-
-  const frames: string[] = [];
-  for (let i = 0; i < count; i++) {
-    const num = String(i + 1).padStart(3, '0');
-    const filePath = `${prefix}${num}.jpg`;
-    try {
-      const buf = await fs.readFile(filePath);
-      frames.push(buf.toString('base64'));
-      await fs.unlink(filePath);
-    } catch {
-      // skip missing frame
-    }
-  }
-  return frames;
-}
-
-/** Get video duration in seconds using ffprobe. */
-async function getVideoDuration(videoPath: string, signal?: AbortSignal): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn(
-      'ffprobe',
-      ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', '-i', videoPath],
-      { stdio: ['ignore', 'pipe', 'pipe'] }
-    );
-
-    if (signal) {
-      if (signal.aborted) {
-        proc.kill();
-        return reject(new Error('Aborted'));
-      }
-      signal.addEventListener('abort', () => {
-        proc.kill();
-        reject(new Error('Aborted'));
-      }, { once: true });
-    }
-
-    let out = '';
-    proc.stdout?.on('data', (c) => { out += c.toString(); });
-    proc.on('error', reject);
-    proc.on('close', (code) => {
-      if (code !== 0) return reject(new Error(`ffprobe exited ${code}`));
-      const sec = parseFloat(out.trim());
-      resolve(Number.isFinite(sec) ? sec : 0);
-    });
-  });
-}
-
-const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp']);
-const IMAGE_MIME: Record<string, string> = {
-  '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
-  '.gif': 'image/gif', '.webp': 'image/webp',
-};
-
-/** Read image file to base64, or extract one frame from video. Returns data URL suffix (mime;base64,data). */
-async function readImageOrVideoFrame(filePath: string, signal?: AbortSignal): Promise<{ url: string }> {
-  const ext = path.extname(filePath).toLowerCase();
-  if (IMAGE_EXT.has(ext)) {
-    const buf = await fs.readFile(filePath);
-    const mime = IMAGE_MIME[ext] ?? 'image/jpeg';
-    return { url: `data:${mime};base64,${buf.toString('base64')}` };
-  }
-  const oneFrame = await extractFrames(filePath, 1, 1, signal);
-  if (oneFrame.length === 0) throw new Error(`Could not extract frame from ${filePath}`);
-  return { url: `data:image/jpeg;base64,${oneFrame[0]}` };
-}
+import {
+  resolvePromptPlaceholders,
+  extractFrames,
+  getVideoDuration,
+  readImageOrVideoFrame,
+  callOpenRouter,
+} from './utils.js';
 
 export const openrouterVisionMeta = {
   type: 'llm.openrouter.vision',
@@ -298,68 +163,25 @@ export class OpenRouterVisionModule implements WorkflowModule {
     }
 
     onProgress?.(40, 'Calling OpenRouter');
-    const requestBody = {
+    onLog?.(`[OpenRouter Vision] Sending request to OpenRouter (model: ${model})...`);
+
+    const result = await callOpenRouter({
+      apiKey,
       model,
       messages: [{ role: 'user', content }],
-      max_tokens: maxTokens,
+      maxTokens,
       temperature,
-    };
-    const bodyStr = JSON.stringify(requestBody);
-    const bodySize = bodyStr.length;
-    onLog?.(`[OpenRouter Vision] Sending request to OpenRouter (model: ${model})...`);
-    onLog?.(`[OpenRouter Vision] Request body size: ${(bodySize / 1024).toFixed(1)} KB (${(bodySize / 1024 / 1024).toFixed(2)} MB)`);
-    if (bodySize > 4 * 1024 * 1024) {
-      onLog?.(`[OpenRouter Vision] WARNING: Body > 4 MB. Some APIs may truncate or reject large payloads.`);
+      signal: context.signal,
+      timeoutMs: 300_000,
+      onLog,
+    });
+
+    if ('error' in result) {
+      return { success: false, error: result.error };
     }
 
-    const timeoutMs = 300_000; // 5 min for large video uploads
-    const fetchController = new AbortController();
-    const timeoutId = setTimeout(() => {
-      fetchController.abort();
-    }, timeoutMs);
-    context.signal?.addEventListener('abort', () => {
-      clearTimeout(timeoutId);
-      fetchController.abort();
-    }, { once: true });
-
-    let res: Response;
-    try {
-      res = await fetch(OPENROUTER_BASE, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-          'HTTP-Referer': 'https://github.com/SurninSynergy/online-game-commenter',
-          'X-Title': 'Online Game Commenter',
-        },
-        signal: fetchController.signal,
-        body: bodyStr,
-      });
-    } catch (e) {
-      clearTimeout(timeoutId);
-      onLog?.(`[OpenRouter Vision] Request FAILED: ${e instanceof Error ? e.message : String(e)}`);
-      const msg = e instanceof Error && e.name === 'AbortError'
-        ? 'Request aborted (timeout or cancelled)'
-        : String(e);
-      return { success: false, error: `OpenRouter request failed: ${msg}` };
-    }
-    clearTimeout(timeoutId);
-
-    onLog?.(`[OpenRouter Vision] Response status: ${res.status} ${res.statusText}`);
-
-    if (!res.ok) {
-      const errText = await res.text();
-      onLog?.(`[OpenRouter Vision] Error from OpenRouter: ${res.status} ${errText.slice(0, 500)}`);
-      return { success: false, error: `OpenRouter error ${res.status}: ${errText.slice(0, 500)}` };
-    }
-
-    const data = await res.json() as any;
-    const text = data?.choices?.[0]?.message?.content?.trim() ?? '';
-    const choiceCount = data?.choices?.length ?? 0;
-    onLog?.(`[OpenRouter Vision] Response received. choices: ${choiceCount}, content length: ${text.length} chars`);
-    if (text.length === 0 && choiceCount > 0) {
-      onLog?.(`[OpenRouter Vision] WARNING: Response has choices but empty content. finish_reason: ${data?.choices?.[0]?.finish_reason ?? 'unknown'}`);
-    }
+    const text = result.text;
+    const usage = result.usage;
 
     onProgress?.(90, 'Writing output');
     const outDir = context.moduleCacheDir ?? context.tempDir;
@@ -367,6 +189,12 @@ export class OpenRouterVisionModule implements WorkflowModule {
     const outputPath = path.join(outDir, `output${ext}`);
     await fs.writeFile(outputPath, text, 'utf8');
     onLog?.(`Result saved to output${ext}`);
+
+    if (usage && usage.total_tokens > 0) {
+      const metadataPath = path.join(outDir, 'metadata.json');
+      await fs.writeFile(metadataPath, JSON.stringify({ model, tokenUsage: usage }, null, 2), 'utf8');
+      onLog?.(`[OpenRouter Vision] Token usage: ${usage.prompt_tokens} prompt + ${usage.completion_tokens} completion = ${usage.total_tokens} total`);
+    }
 
     onProgress?.(100, 'Done');
     onLog?.(`[OpenRouter Vision] === Module complete. Output: ${outputPath} ===`);

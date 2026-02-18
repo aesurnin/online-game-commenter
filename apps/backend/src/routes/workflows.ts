@@ -7,6 +7,7 @@ import * as workflowService from '../lib/workflow/service.js';
 import { listModules } from '../lib/workflow/registry.js';
 import { createJob, getJob } from '../lib/workflow-job-store.js';
 import { addWorkflowJob } from '../lib/queue.js';
+import { ensurePricingLoaded, calculateCost } from '../lib/workflow/openrouter-pricing.js';
 
 const workflowsRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.addHook('preHandler', async (request, reply) => {
@@ -18,6 +19,19 @@ const workflowsRoutes: FastifyPluginAsync = async (fastify) => {
   /** List available module types (for editor) - must be before :id */
   fastify.get('/modules/list', async (request, reply) => {
     return reply.send(listModules());
+  });
+
+  /** Estimate cost in USD for given model and token usage */
+  fastify.get<{ Querystring: { model?: string; prompt?: string; completion?: string } }>('/estimate-cost', async (request, reply) => {
+    const { model = 'unknown', prompt = '0', completion = '0' } = request.query;
+    const promptTokens = Math.max(0, parseInt(prompt, 10) || 0);
+    const completionTokens = Math.max(0, parseInt(completion, 10) || 0);
+    if (promptTokens === 0 && completionTokens === 0) {
+      return reply.send({ costUsd: 0 });
+    }
+    await ensurePricingLoaded();
+    const costUsd = calculateCost(model, promptTokens, completionTokens);
+    return reply.send({ costUsd });
   });
 
   /** Get job status (progress, logs, outputUrl) */

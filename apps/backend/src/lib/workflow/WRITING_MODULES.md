@@ -129,6 +129,45 @@ register(new MyNewModule());
 - **FFmpeg**: If using FFmpeg, consider using the `spawn` pattern seen in `video-compressor.ts` or `video-crop.ts` to parse progress from stderr.
 - **Idempotency**: Modules should ideally be idempotent given the same inputs and parameters.
 
+## Paid API Modules (Cost Tracking)
+
+**All modules that call paid APIs must save `metadata.json`** in their cache directory so the workflow can aggregate total cost. Use one of two formats:
+
+### Option A: Token-based (OpenRouter, LLM)
+
+When the API returns token usage:
+
+```typescript
+const metadata = {
+  model: 'openai/gpt-4o',  // or whatever model was used
+  tokenUsage: { prompt_tokens, completion_tokens, total_tokens },
+};
+await fs.writeFile(path.join(outDir, 'metadata.json'), JSON.stringify(metadata, null, 2), 'utf8');
+```
+
+The runner calculates cost from OpenRouter pricing.
+
+### Option B: Direct cost (ElevenLabs, etc.)
+
+When the API uses different units (characters, seconds, etc.), **the module calculates and writes cost itself**:
+
+```typescript
+const costUsd = 0.045;  // from API response or your pricing calculation
+const metadata = {
+  costUsd,
+  // optional: provider-specific details for display
+  provider: 'elevenlabs',
+  characters: 1500,
+};
+await fs.writeFile(path.join(outDir, 'metadata.json'), JSON.stringify(metadata, null, 2), 'utf8');
+```
+
+**Unified format:** The runner reads `metadata.json` from every step. If `costUsd` is present, it uses it. Otherwise, if `tokenUsage` + `model` are present, it calculates from OpenRouter pricing. All costs are summed into the workflow total.
+
+### Execution time
+
+**The runner automatically writes `executionTimeMs`** to each step's `metadata.json` after the module completes. No module code is required. The value is the wall-clock duration in milliseconds. Total execution time is aggregated and shown in the workflow panel.
+
 ## Special Features
 
 ### Interactive UI (Custom Actions)

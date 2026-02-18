@@ -19,6 +19,7 @@ import { RightPanel } from "@/components/RightPanel"
 import { EnvManagerModal } from "@/components/EnvManagerModal"
 import { VariableManagerModal } from "@/components/VariableManagerModal"
 import { WorkflowVariableProvider, useWorkflowVariable } from "@/contexts/WorkflowVariableContext"
+import { WorkflowJobProvider } from "@/contexts/WorkflowJobContext"
 
 const LAYOUT_STORAGE_KEY = "app-layout-main-right"
 const PANELS_VISIBLE_KEY = "app-panels-visible"
@@ -407,9 +408,11 @@ function App() {
       <LogsProvider>
         <SelectedVideoProvider>
           <PreviewVideoProvider>
-            <BrowserRouter>
-              <AppLayout />
-            </BrowserRouter>
+            <WorkflowJobProvider>
+              <BrowserRouter>
+                <AppLayout />
+              </BrowserRouter>
+            </WorkflowJobProvider>
           </PreviewVideoProvider>
         </SelectedVideoProvider>
       </LogsProvider>

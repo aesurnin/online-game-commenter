@@ -90,7 +90,7 @@ export function RightPanel({
   return (
     <div ref={containerRef} className="h-full w-full flex flex-col min-w-0 bg-panel-1 border-l border-border">
       <Group
-        key={`${workflowVisible}-${logsVisible}`}
+        key={workflowVisible ? "workflow" : "no-workflow"}
         id="right-workflow-logs"
         orientation="vertical"
         className="flex-1 min-h-0 right-panel-group"

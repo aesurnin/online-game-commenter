@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect } from "react"
 import ReactMarkdown from "react-markdown"
 import { Button } from "@/components/ui/button"
+import { RemotionPreview } from "@/components/remotion/RemotionPreview"
 import type { PreviewAssetState, PreviewAssetMetadata } from "@/contexts/PreviewVideoContext"
 
 function formatSize(bytes?: number): string {
@@ -34,13 +35,35 @@ function MetadataPanel({ metadata, openUrl }: { metadata?: PreviewAssetMetadata;
     metadata.contentType ||
     metadata.duration != null ||
     (metadata.width != null && metadata.height != null) ||
-    metadata.key
+    metadata.key ||
+    metadata.tokenUsage ||
+    metadata.costUsd != null ||
+    metadata.executionTimeMs != null
   )
   if (!hasAny && !openUrl) return null
+  const tu = metadata?.tokenUsage
   return (
     <div className="rounded-lg border bg-muted/30 p-3 text-sm space-y-2">
       <div className="font-medium text-xs uppercase tracking-wider text-muted-foreground">Metadata</div>
       <div className="grid gap-x-4 gap-y-1 text-xs">
+        {metadata?.executionTimeMs != null && metadata.executionTimeMs > 0 && (
+          <div className="flex justify-between gap-4">
+            <span className="text-muted-foreground">Execution time</span>
+            <span>{(metadata.executionTimeMs / 1000).toFixed(1)}s</span>
+          </div>
+        )}
+        {tu && tu.total_tokens > 0 && (
+          <div className="flex justify-between gap-4">
+            <span className="text-muted-foreground">Tokens</span>
+            <span>{tu.prompt_tokens} prompt + {tu.completion_tokens} completion = {tu.total_tokens} total</span>
+          </div>
+        )}
+        {metadata?.costUsd != null && metadata.costUsd > 0 && (
+          <div className="flex justify-between gap-4">
+            <span className="text-muted-foreground">Est. cost</span>
+            <span className="font-medium">${metadata.costUsd.toFixed(4)}</span>
+          </div>
+        )}
         {metadata?.size != null && (
           <div className="flex justify-between gap-4">
             <span className="text-muted-foreground">Size</span>
@@ -106,16 +129,84 @@ function getFullUrl(url: string): string {
   return `${window.location.origin}${url.startsWith("/") ? "" : "/"}${url}`
 }
 
+/** Derive metadata.json URL from workflow-cache output URL (output.md / output.json) */
+function getModuleMetadataUrl(outputUrl: string): string | null {
+  if (!outputUrl.includes("workflow-cache") || !outputUrl.includes("/file?")) return null
+  if (!/path=[^&]*(?:output\.(?:md|json|txt))/i.test(outputUrl)) return null
+  return outputUrl.replace(/path=[^&]+/, `path=${encodeURIComponent("metadata.json")}`)
+}
+
 function isTextContentType(contentType: string, url: string): boolean {
-  if (contentType.startsWith("text/")) return true
+  if (contentType.startsWith("text/") || contentType === "application/json") return true
   const u = url.split("?")[0].toLowerCase()
-  return u.endsWith(".txt") || u.endsWith(".md")
+  return u.endsWith(".txt") || u.endsWith(".md") || u.endsWith(".json")
 }
 
 function isMarkdownContentType(contentType: string, url: string): boolean {
   if (contentType === "text/markdown") return true
   const u = url.split("?")[0].toLowerCase()
   return u.endsWith(".md")
+}
+
+function RemotionPreviewWrapper({
+  remotionSceneUrl,
+  header,
+}: {
+  remotionSceneUrl: string
+  header: React.ReactNode
+}) {
+  const [scene, setScene] = useState<Record<string, unknown> | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setError(null)
+    setScene(null)
+    const url = remotionSceneUrl.startsWith("http") || remotionSceneUrl.startsWith("/")
+      ? remotionSceneUrl
+      : getFullUrl(remotionSceneUrl)
+    fetch(url, { credentials: "include" })
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        return r.json()
+      })
+      .then((data) => {
+        if (!cancelled) setScene((data?.scene ?? data) as Record<string, unknown>)
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e))
+      })
+    return () => { cancelled = true }
+  }, [remotionSceneUrl])
+
+  if (error) {
+    return (
+      <div className="w-full max-w-4xl space-y-3">
+        <div className="rounded-lg overflow-hidden shadow-lg border bg-background p-4">
+          {header}
+          <p className="text-destructive text-sm mt-2">Failed to load Remotion scene: {error}</p>
+        </div>
+      </div>
+    )
+  }
+  if (scene === null) {
+    return (
+      <div className="w-full max-w-4xl space-y-3">
+        <div className="rounded-lg overflow-hidden shadow-lg border bg-background p-8 text-center">
+          {header}
+          <p className="text-muted-foreground text-sm mt-4">Loading Remotion scene…</p>
+        </div>
+      </div>
+    )
+  }
+  return (
+    <div className="w-full max-w-4xl flex flex-col items-center space-y-3">
+      <div className="rounded-lg overflow-hidden shadow-lg border bg-background flex flex-col w-full">
+        {header}
+      </div>
+      <RemotionPreview scene={scene as Parameters<typeof RemotionPreview>[0]["scene"]} />
+    </div>
+  )
 }
 
 function TextContentPreview({ url, contentType }: { url: string; contentType: string }) {
@@ -179,6 +270,54 @@ function TextContentPreview({ url, contentType }: { url: string; contentType: st
 
 export function UniversalViewer({ asset, onClose }: UniversalViewerProps) {
   const [mediaMetadata, setMediaMetadata] = useState<Partial<PreviewAssetMetadata>>({})
+  const [moduleMetadata, setModuleMetadata] = useState<{ tokenUsage?: PreviewAssetMetadata["tokenUsage"] } | null>(null)
+
+  const contentType = asset?.contentType ?? ""
+  const isTextResolved = asset ? isTextContentType(contentType, asset.url) : false
+  const metadataUrl = asset && isTextResolved ? getModuleMetadataUrl(asset.url) : null
+
+  useEffect(() => {
+    if (!metadataUrl) {
+      setModuleMetadata(null)
+      return
+    }
+    let cancelled = false
+    setModuleMetadata(null)
+    const fullUrl = metadataUrl.startsWith("http") || metadataUrl.startsWith("/") ? metadataUrl : getFullUrl(metadataUrl)
+    fetch(fullUrl, { credentials: "include" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then(async (data: { tokenUsage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number }; model?: string; costUsd?: number; executionTimeMs?: number } | null) => {
+        if (!data) return
+        const tu = data.tokenUsage
+        const hasTokens = tu && (tu.total_tokens ?? tu.prompt_tokens + tu.completion_tokens) > 0
+        const hasCost = data.costUsd != null && data.costUsd > 0
+        const hasExecutionTime = data.executionTimeMs != null && data.executionTimeMs > 0
+        if (!hasTokens && !hasCost && !hasExecutionTime) return
+        let costUsd: number | undefined = typeof data.costUsd === "number" && data.costUsd > 0 ? data.costUsd : undefined
+        if (costUsd == null && hasTokens && data.model) {
+          try {
+            const params = new URLSearchParams({
+              model: data.model,
+              prompt: String(tu!.prompt_tokens),
+              completion: String(tu!.completion_tokens),
+            })
+            const costRes = await fetch(`/api/workflows/estimate-cost?${params}`, { credentials: "include" })
+            if (costRes.ok) {
+              const { costUsd: c } = await costRes.json()
+              if (typeof c === "number" && c > 0) costUsd = c
+            }
+          } catch { /* ignore */ }
+        }
+        if (cancelled) return
+        setModuleMetadata({
+          tokenUsage: tu ?? undefined,
+          costUsd,
+          executionTimeMs: typeof data.executionTimeMs === 'number' && data.executionTimeMs > 0 ? data.executionTimeMs : undefined,
+        })
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [metadataUrl])
 
   const handleVideoMetadata = useCallback((e: React.SyntheticEvent<HTMLVideoElement>) => {
     const v = e.currentTarget
@@ -194,13 +333,18 @@ export function UniversalViewer({ asset, onClose }: UniversalViewerProps) {
     setMediaMetadata({ width: img.naturalWidth, height: img.naturalHeight })
   }, [])
 
-  if (!asset?.url) return null
+  const handleAudioMetadata = useCallback((e: React.SyntheticEvent<HTMLAudioElement>) => {
+    const a = e.currentTarget
+    setMediaMetadata({ duration: a.duration })
+  }, [])
 
-  const contentType = asset.contentType ?? ""
+  if (!asset) return null
+
+  const remotionSceneUrl = asset.remotionSceneUrl
   const isVideo = contentType.startsWith("video/")
   const isImage = contentType.startsWith("image/")
-  const isText = isTextContentType(contentType, asset.url)
-  const mergedMetadata = { ...asset.metadata, ...mediaMetadata }
+  const isAudio = contentType.startsWith("audio/") || /\.(mp3|wav|ogg|m4a)$/i.test(asset.url.split("?")[0])
+  const mergedMetadata = { ...asset.metadata, ...mediaMetadata, ...moduleMetadata }
   const fullUrl = getFullUrl(asset.url)
 
   const header = (
@@ -214,7 +358,24 @@ export function UniversalViewer({ asset, onClose }: UniversalViewerProps) {
     </div>
   )
 
-  if (isText) {
+  if (asset.inlineRemotionScene) {
+    return (
+      <div className="w-full max-w-4xl flex flex-col items-center space-y-3">
+        <div className="rounded-lg overflow-hidden shadow-lg border bg-background flex flex-col w-full">
+          {header}
+        </div>
+        <RemotionPreview scene={asset.inlineRemotionScene as Parameters<typeof RemotionPreview>[0]["scene"]} />
+      </div>
+    )
+  }
+
+  if (remotionSceneUrl) {
+    return (
+      <RemotionPreviewWrapper remotionSceneUrl={remotionSceneUrl} header={header} />
+    )
+  }
+
+  if (isTextResolved) {
     return (
       <div className="w-full max-w-4xl space-y-3">
         <div className="rounded-lg overflow-hidden shadow-lg border bg-background flex flex-col max-h-[75vh]">
@@ -256,7 +417,17 @@ export function UniversalViewer({ asset, onClose }: UniversalViewerProps) {
               onLoad={handleImageLoad}
             />
           )}
-          {!isVideo && !isImage && (
+          {isAudio && (
+            <div className="w-full max-w-lg px-4 py-8">
+              <audio
+                src={asset.url}
+                controls
+                className="w-full"
+                onLoadedMetadata={handleAudioMetadata}
+              />
+            </div>
+          )}
+          {!isVideo && !isImage && !isAudio && (
             <div className="p-8 text-center text-muted-foreground">
               <p className="text-sm">Preview not available for this file type</p>
               <p className="text-xs mt-1">{contentType || "Unknown type"}</p>

@@ -2,6 +2,7 @@ import { useState, useEffect } from "react"
 import { File, ChevronDown, ChevronRight, ExternalLink, Loader2, Folder, Trash2 } from "lucide-react"
 import { useSelectedVideo } from "@/contexts/SelectedVideoContext"
 import { usePreviewVideo } from "@/contexts/PreviewVideoContext"
+import { ConfirmDialog } from "@/components/ui/confirm-dialog"
 
 type Asset = {
   key: string
@@ -34,6 +35,11 @@ function formatDate(iso?: string): string {
 
 type WorkflowCacheFolder = { folderName: string; moduleId: string }
 
+type PendingDelete =
+  | { type: "asset"; asset: Asset }
+  | { type: "cache"; folder: WorkflowCacheFolder }
+  | null
+
 export function AssetsPanel({ hideHeader }: { hideHeader?: boolean } = {}) {
   const { selectedVideo, assetsRefreshTrigger, refreshAssets } = useSelectedVideo()
   const { setPreviewVideo } = usePreviewVideo()
@@ -41,6 +47,7 @@ export function AssetsPanel({ hideHeader }: { hideHeader?: boolean } = {}) {
   const [workflowCache, setWorkflowCache] = useState<WorkflowCacheFolder[]>([])
   const [loading, setLoading] = useState(false)
   const [expandedKey, setExpandedKey] = useState<string | null>(null)
+  const [pendingDelete, setPendingDelete] = useState<PendingDelete>(null)
 
   const projectId = selectedVideo?.projectId
   const videoId = selectedVideo?.videoId
@@ -79,8 +86,43 @@ export function AssetsPanel({ hideHeader }: { hideHeader?: boolean } = {}) {
     )
   }
 
+  const handleConfirmDelete = async () => {
+    if (!pendingDelete || !projectId || !videoId) return
+    if (pendingDelete.type === "asset") {
+      await fetch(`/api/projects/${projectId}/videos/${videoId}/assets`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ key: pendingDelete.asset.key }),
+      }).then((r) => r.ok && refreshAssets())
+    } else {
+      await fetch(`/api/projects/${projectId}/videos/${videoId}/workflow-cache/cleanup`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ moduleIds: [pendingDelete.folder.moduleId] }),
+      }).then((r) => r.ok && refreshAssets())
+    }
+  }
+
   return (
     <div className="flex flex-col h-full min-h-0">
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        onOpenChange={(open) => !open && setPendingDelete(null)}
+        title="Delete confirmation"
+        message={
+          pendingDelete?.type === "asset"
+            ? `Delete "${pendingDelete.asset.shortKey}"? This cannot be undone.`
+            : pendingDelete?.type === "cache"
+              ? `Delete workflow cache folder "${pendingDelete.folder.folderName}"? This cannot be undone.`
+              : ""
+        }
+        confirmLabel="Delete"
+        loadingLabel="Deleting…"
+        variant="destructive"
+        onConfirm={handleConfirmDelete}
+      />
       {!hideHeader && (
         <div className="px-3 pt-3 pb-2 border-b shrink-0">
           <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
@@ -108,7 +150,7 @@ export function AssetsPanel({ hideHeader }: { hideHeader?: boolean } = {}) {
                     folder={folder}
                     projectId={projectId}
                     videoId={videoId}
-                    onDeleted={refreshAssets}
+                    onDeleteRequest={() => setPendingDelete({ type: "cache", folder })}
                     onPreview={setPreviewVideo}
                   />
                 ))}
@@ -141,17 +183,7 @@ export function AssetsPanel({ hideHeader }: { hideHeader?: boolean } = {}) {
                         },
                       })
                     }
-                    onDelete={() => {
-                      if (!confirm(`Delete "${asset.shortKey}"? This cannot be undone.`)) return
-                      fetch(`/api/projects/${projectId}/videos/${videoId}/assets`, {
-                        method: "DELETE",
-                        headers: { "Content-Type": "application/json" },
-                        credentials: "include",
-                        body: JSON.stringify({ key: asset.key }),
-                      })
-                        .then((r) => r.ok && refreshAssets())
-                        .catch(() => {})
-                    }}
+                    onDelete={() => setPendingDelete({ type: "asset", asset })}
                   />
                 ))}
               </>
@@ -176,26 +208,26 @@ function getContentTypeFromExt(filename: string): string {
   return map[ext] ?? "application/octet-stream"
 }
 
-type CacheEntry = { name: string; type: "file" | "dir"; size?: number }
+type CacheEntry = { name: string; type: "file" | "dir"; size?: number; lastModified?: string }
 
 function WorkflowCacheRow({
   folder,
   projectId,
   videoId,
-  onDeleted,
+  onDeleteRequest,
   onPreview,
 }: {
   folder: WorkflowCacheFolder
   projectId: string
   videoId: string
-  onDeleted: () => void
+  onDeleteRequest: () => void
   onPreview: (v: { url: string; label: string; contentType: string; metadata?: Record<string, unknown> }) => void
 }) {
-  const [deleting, setDeleting] = useState(false)
   const [expanded, setExpanded] = useState(false)
   const [entries, setEntries] = useState<CacheEntry[]>([])
   const [loading, setLoading] = useState(false)
   const [pathStack, setPathStack] = useState<string[]>([])
+  const [expandedEntryKey, setExpandedEntryKey] = useState<string | null>(null)
 
   const currentPath = pathStack.length > 0 ? pathStack.join("/") : undefined
 
@@ -212,29 +244,19 @@ function WorkflowCacheRow({
       .finally(() => setLoading(false))
   }, [expanded, projectId, videoId, folder.folderName, currentPath])
 
-  const handleDelete = () => {
-    if (!confirm(`Delete workflow cache folder "${folder.folderName}"? This cannot be undone.`)) return
-    setDeleting(true)
-    fetch(`/api/projects/${projectId}/videos/${videoId}/workflow-cache/cleanup`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({ moduleIds: [folder.moduleId] }),
-    })
-      .then((r) => r.ok && onDeleted())
-      .finally(() => setDeleting(false))
-  }
-
   const goInto = (name: string) => {
     setPathStack((prev) => [...prev, name])
+    setExpandedEntryKey(null)
   }
 
   const goUp = () => {
     setPathStack((prev) => prev.slice(0, -1))
+    setExpandedEntryKey(null)
   }
 
   const goToRoot = () => {
     setPathStack([])
+    setExpandedEntryKey(null)
   }
 
   return (
@@ -253,12 +275,11 @@ function WorkflowCacheRow({
           {folder.folderName}
         </span>
         <button
-          className="shrink-0 p-1 rounded hover:bg-destructive/20 hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity disabled:opacity-50"
+          className="shrink-0 p-1 rounded hover:bg-destructive/20 hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity"
           onClick={(e) => {
             e.stopPropagation()
-            handleDelete()
+            onDeleteRequest()
           }}
-          disabled={deleting}
           title="Delete"
         >
           <Trash2 className="h-3 w-3" />
@@ -316,49 +337,113 @@ function WorkflowCacheRow({
                   </button>
                 </li>
               )}
-              {entries.map((entry) => (
-                <li key={entry.name}>
-                  {entry.type === "dir" ? (
-                    <button
-                      className="flex items-center gap-2 w-full text-left hover:bg-muted/50 rounded px-1.5 py-0.5 -ml-1.5"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        goInto(entry.name)
-                      }}
-                    >
-                      <Folder className="h-3 w-3 text-muted-foreground shrink-0" />
-                      <span className="truncate">{entry.name}</span>
-                    </button>
-                  ) : (
-                    <div className="flex items-center gap-2 px-1.5 py-0.5 -ml-1.5 group/row">
-                      <File className="h-3 w-3 text-muted-foreground shrink-0" />
-                      <span className="truncate flex-1">{entry.name}</span>
-                      {entry.size != null && (
-                        <span className="text-muted-foreground shrink-0">{formatSize(entry.size)}</span>
-                      )}
-                      {PREVIEWABLE_EXT.test(entry.name) && (
-                        <button
-                          className="shrink-0 p-1 rounded hover:bg-muted opacity-0 group-hover/row:opacity-100 transition-opacity"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            const relPath = currentPath ? `${currentPath}/${entry.name}` : entry.name
-                            const url = `/api/projects/${projectId}/videos/${videoId}/workflow-cache/${encodeURIComponent(folder.folderName)}/file?path=${encodeURIComponent(relPath)}`
-                            onPreview({
-                              url,
-                              label: `${folder.folderName}/${relPath}`,
-                              contentType: getContentTypeFromExt(entry.name),
-                              metadata: { size: entry.size },
-                            })
-                          }}
-                          title="Preview"
+              {entries.map((entry) => {
+                const relPath = currentPath ? `${currentPath}/${entry.name}` : entry.name
+                const isExpanded = entry.type === "file" && expandedEntryKey === relPath
+                const canPreview = entry.type === "file" && PREVIEWABLE_EXT.test(entry.name)
+                return (
+                  <li key={entry.name}>
+                    {entry.type === "dir" ? (
+                      <button
+                        className="flex items-center gap-2 w-full text-left hover:bg-muted/50 rounded px-1.5 py-0.5 -ml-1.5"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          goInto(entry.name)
+                        }}
+                      >
+                        <Folder className="h-3 w-3 text-muted-foreground shrink-0" />
+                        <span className="truncate">{entry.name}</span>
+                      </button>
+                    ) : (
+                      <div className="rounded border bg-panel-3/50 mb-0.5 overflow-hidden">
+                        <div
+                          className="flex items-center gap-2 px-1.5 py-0.5 -ml-1.5 group/row cursor-pointer hover:bg-muted/50"
+                          onClick={() => setExpandedEntryKey((k) => (k === relPath ? null : relPath))}
                         >
-                          <ExternalLink className="h-3 w-3" />
-                        </button>
-                      )}
-                    </div>
-                  )}
-                </li>
-              ))}
+                          {isExpanded ? (
+                            <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
+                          ) : (
+                            <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground" />
+                          )}
+                          <File className="h-3 w-3 text-muted-foreground shrink-0" />
+                          <span className="truncate flex-1">{entry.name}</span>
+                          {entry.size != null && (
+                            <span className="text-muted-foreground shrink-0">{formatSize(entry.size)}</span>
+                          )}
+                          {canPreview && (
+                            <button
+                              className="shrink-0 p-1 rounded hover:bg-muted opacity-0 group-hover/row:opacity-100 transition-opacity"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                const url = `/api/projects/${projectId}/videos/${videoId}/workflow-cache/${encodeURIComponent(folder.folderName)}/file?path=${encodeURIComponent(relPath)}`
+                                onPreview({
+                                  url,
+                                  label: `${folder.folderName}/${relPath}`,
+                                  contentType: getContentTypeFromExt(entry.name),
+                                  metadata: { size: entry.size, lastModified: entry.lastModified },
+                                })
+                              }}
+                              title="Preview"
+                            >
+                              <ExternalLink className="h-3 w-3" />
+                            </button>
+                          )}
+                        </div>
+                        {isExpanded && (
+                          <div className="px-2 pb-2 pt-0 space-y-1 text-xs text-muted-foreground border-t bg-panel-2">
+                            <div className="flex justify-between gap-4">
+                              <span>Size</span>
+                              <span>{formatSize(entry.size)}</span>
+                            </div>
+                            <div className="flex justify-between gap-4">
+                              <span>Modified</span>
+                              <span>{formatDate(entry.lastModified)}</span>
+                            </div>
+                            <div className="flex justify-between gap-4">
+                              <span>Type</span>
+                              <span>{getContentTypeFromExt(entry.name)}</span>
+                            </div>
+                            <div className="pt-1">
+                              <span className="block text-muted-foreground/70 mb-0.5">Full path</span>
+                              <code className="block text-[10px] break-all bg-muted/50 rounded px-1.5 py-1">
+                                {folder.folderName}/{relPath}
+                              </code>
+                            </div>
+                            {canPreview && (
+                              <div className="mt-2 flex gap-3">
+                                <button
+                                  className="text-xs text-primary hover:underline"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    const url = `/api/projects/${projectId}/videos/${videoId}/workflow-cache/${encodeURIComponent(folder.folderName)}/file?path=${encodeURIComponent(relPath)}`
+                                    onPreview({
+                                      url,
+                                      label: `${folder.folderName}/${relPath}`,
+                                      contentType: getContentTypeFromExt(entry.name),
+                                      metadata: { size: entry.size, lastModified: entry.lastModified },
+                                    })
+                                  }}
+                                >
+                                  Preview in main area
+                                </button>
+                                <a
+                                  href={`/api/projects/${projectId}/videos/${videoId}/workflow-cache/${encodeURIComponent(folder.folderName)}/file?path=${encodeURIComponent(relPath)}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-xs text-primary hover:underline"
+                                  onClick={(e) => e.stopPropagation()}
+                                >
+                                  Open in new tab
+                                </a>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </li>
+                )
+              })}
             </ul>
           )}
         </div>

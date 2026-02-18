@@ -23,6 +23,7 @@ import {
   PlusCircle,
   MinusCircle,
   Database,
+  Eraser,
 } from "lucide-react"
 import { useSelectedVideo } from "@/contexts/SelectedVideoContext"
 import { useLogs } from "@/contexts/LogsContext"
@@ -530,6 +531,33 @@ export function WorkflowEditor() {
     }
   }
 
+  const clearModuleCache = (index: number) => {
+    if (!projectId || !videoId || !workflow) return
+    const mod = workflow.modules[index]
+    if (!mod?.id) return
+    fetch(`/api/projects/${projectId}/videos/${videoId}/workflow-cache/cleanup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ moduleIds: [mod.id] }),
+    })
+      .then(() => {
+        refreshAssets()
+        return fetch(`/api/projects/${projectId}/videos/${videoId}/workflow-cache/ensure`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ items: [{ moduleId: mod.id, moduleType: mod.type }] }),
+        })
+      })
+      .then(() => refreshAssets())
+      .catch(() => {})
+    updateVideoState(videoId, {
+      stepStatuses: { ...stepStatuses, [index]: "pending" },
+    })
+    addLog(`Cache cleared for step ${index + 1}: ${mod.type}`, "info", videoId)
+  }
+
   const moveModule = (index: number, dir: "up" | "down") => {
     if (!videoId || !workflow) return
     const newIdx = dir === "up" ? index - 1 : index + 1
@@ -906,6 +934,7 @@ export function WorkflowEditor() {
                   onOutputsChange={(outputs) => updateModuleOutputs(idx, outputs)}
                   onRenameVariable={renameVariableInWorkflow}
                   onRunStep={() => runStep(idx)}
+                  onClearCache={() => clearModuleCache(idx)}
                   onPreview={() => stepOutputUrls[idx] && handlePreview(stepOutputUrls[idx], `Step ${idx + 1}`, stepOutputContentTypes[idx])}
                   getModuleLabel={getModuleLabel}
                   getAvailableVariables={() => getAvailableVariablesForModule(idx)}
@@ -994,6 +1023,7 @@ function ModuleBlock({
   onOutputsChange,
   onRenameVariable,
   onRunStep,
+  onClearCache,
   onPreview,
   getModuleLabel,
   getAvailableVariables,
@@ -1016,6 +1046,7 @@ function ModuleBlock({
   onOutputsChange: (outputs: Record<string, string>) => void
   onRenameVariable?: (oldName: string, newName: string) => void
   onRunStep: () => void
+  onClearCache: () => void
   onPreview: () => void
   getModuleLabel: (type: string) => string
   getAvailableVariables: () => string[]
@@ -1152,6 +1183,16 @@ function ModuleBlock({
             disabled={status === "running"}
           >
             <Play className="h-3 w-3" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6"
+            onClick={onClearCache}
+            title="Clear cache"
+            disabled={status === "running"}
+          >
+            <Eraser className="h-3 w-3" />
           </Button>
           <Button variant="ghost" size="icon" className="h-6 w-6" onClick={onMoveUp} title="Move up">
             <ChevronUp className="h-3 w-3" />

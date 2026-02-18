@@ -2,7 +2,7 @@ import { FastifyPluginAsync } from 'fastify';
 import path from 'path';
 import { db } from '../db/index.js';
 import { projects, providerTemplates, videoEntities } from '../db/schema/index.js';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, count } from 'drizzle-orm';
 import z from 'zod';
 import { uploadToR2, deleteFromR2, deletePrefixFromR2, getPresignedUrl, listObjectsWithMetaFromR2, streamObjectFromR2 } from '../lib/r2.js';
 import fs from 'fs';
@@ -56,7 +56,12 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
       where: (p, { and, eq }) => and(eq(p.id, id), eq(p.ownerId, request.user!.id)),
     });
     if (!project) return reply.status(404).send({ error: 'Not found' });
-    return reply.send(project);
+    const [{ videoCount: videoCountVal }] = await db
+      .select({ videoCount: count() })
+      .from(videoEntities)
+      .where(eq(videoEntities.projectId, id));
+    const videoCount = Number(videoCountVal ?? 0);
+    return reply.send({ ...project, videoCount });
   });
 
   fastify.get('/:id/videos', async (request, reply) => {

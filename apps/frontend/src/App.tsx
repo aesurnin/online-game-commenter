@@ -22,6 +22,7 @@ import { WorkflowVariableProvider, useWorkflowVariable } from "@/contexts/Workfl
 
 const LAYOUT_STORAGE_KEY = "app-layout-main-right"
 const PANELS_VISIBLE_KEY = "app-panels-visible"
+const APP_NAME = "Replay Studio"
 
 function AppInit() {
   const { addLog } = useLogs()
@@ -165,7 +166,18 @@ function AppHeader() {
 
 function AppLayout() {
   const location = useLocation()
-  const showLogsPanel = location.pathname !== "/login"
+  const isLogin = location.pathname === "/login"
+
+  useEffect(() => {
+    const base = APP_NAME
+    if (location.pathname === "/login") document.title = `Login | ${base}`
+    else if (location.pathname === "/dashboard") document.title = `Dashboard | ${base}`
+    else if (location.pathname === "/queue") document.title = `Queue | ${base}`
+    else if (location.pathname === "/providers") document.title = `Providers | ${base}`
+    else if (location.pathname.startsWith("/projects/")) document.title = `Project | ${base}`
+    else document.title = base
+  }, [location.pathname])
+  const isDashboard = location.pathname === "/dashboard"
   const rightPanelRef = usePanelRef()
   const isProjectPage = location.pathname.startsWith("/projects/")
 
@@ -244,7 +256,7 @@ function AppLayout() {
 
   const layout = defaultLayout()
 
-  if (!showLogsPanel) {
+  if (isLogin) {
     return (
       <div className="flex h-screen overflow-hidden">
         <AppInit />
@@ -258,6 +270,27 @@ function AppLayout() {
             <Route path="/" element={<Navigate to="/dashboard" replace />} />
             <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Routes>
+        </main>
+      </div>
+    )
+  }
+
+  if (isDashboard) {
+    return (
+      <div className="h-screen overflow-hidden flex flex-col">
+        <AppInit />
+        <main className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
+          <div className="flex-1 min-h-0 flex flex-col">
+          <Routes>
+            <Route path="/login" element={<Login />} />
+            <Route path="/dashboard" element={<Dashboard />} />
+            <Route path="/projects/:id" element={<ProjectView />} />
+            <Route path="/queue" element={<QueueMonitor />} />
+            <Route path="/providers" element={<Providers />} />
+            <Route path="/" element={<Navigate to="/dashboard" replace />} />
+            <Route path="*" element={<Navigate to="/dashboard" replace />} />
+          </Routes>
+          </div>
         </main>
       </div>
     )

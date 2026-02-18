@@ -88,7 +88,7 @@ export async function listWorkflowCacheFolderContents(
   videoId: string,
   folderName: string,
   subPath?: string
-): Promise<{ name: string; type: 'file' | 'dir'; size?: number }[]> {
+): Promise<{ name: string; type: 'file' | 'dir'; size?: number; lastModified?: string }[]> {
   if (folderName.includes('/') || folderName.includes('..') || folderName.startsWith('.')) {
     throw new Error('Invalid folder name');
   }
@@ -100,10 +100,10 @@ export async function listWorkflowCacheFolderContents(
     ? path.join(cacheBase, projectId, videoId, folderName, subPath)
     : path.join(cacheBase, projectId, videoId, folderName);
   const entries = await fs.readdir(dir, { withFileTypes: true });
-  const result: { name: string; type: 'file' | 'dir'; size?: number }[] = [];
+  const result: { name: string; type: 'file' | 'dir'; size?: number; lastModified?: string }[] = [];
   for (const e of entries) {
     if (e.name.startsWith('.') && e.name !== '.module-id') continue;
-    const entry: { name: string; type: 'file' | 'dir'; size?: number } = {
+    const entry: { name: string; type: 'file' | 'dir'; size?: number; lastModified?: string } = {
       name: e.name,
       type: e.isDirectory() ? 'dir' : 'file',
     };
@@ -111,6 +111,7 @@ export async function listWorkflowCacheFolderContents(
       try {
         const stat = await fs.stat(path.join(dir, e.name));
         entry.size = stat.size;
+        entry.lastModified = stat.mtime.toISOString();
       } catch {
         /* ignore */
       }

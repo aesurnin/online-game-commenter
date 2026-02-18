@@ -542,6 +542,82 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
     return reply.send({ success: true });
   });
 
+  /** Get variable values for a workflow on a specific video. POST with workflow body. */
+  fastify.post<{
+    Params: { id: string; videoId: string };
+    Body: { workflow?: { modules?: Array<{ id: string; type: string; outputs?: Record<string, string>; params?: Record<string, unknown> }> } };
+  }>('/:id/videos/:videoId/workflow-variables', async (request, reply) => {
+    const { id: projectId, videoId } = request.params;
+    const { workflow } = request.body ?? {};
+    const modules = workflow?.modules ?? [];
+
+    const project = await db.query.projects.findFirst({
+      where: (p, { and, eq }) => and(eq(p.id, projectId), eq(p.ownerId, request.user!.id)),
+    });
+    if (!project) return reply.status(404).send({ error: 'Not found' });
+
+    const [video] = await db.select()
+      .from(videoEntities)
+      .where(and(eq(videoEntities.id, videoId), eq(videoEntities.projectId, projectId)));
+    if (!video) return reply.status(404).send({ error: 'Video not found' });
+
+    const values: Record<string, { value: string; preview?: string; url?: string }> = {};
+
+    values.source = {
+      value: video.sourceUrl ?? '(no source)',
+      preview: video.sourceUrl?.startsWith('projects/') ? 'R2 object' : undefined,
+      url: video.sourceUrl?.startsWith('projects/') ? `/api/projects/${projectId}/videos/${videoId}/stream` : undefined,
+    };
+
+    const cacheFolders = await listWorkflowModuleCache(projectId, videoId);
+    const folderByModuleId = new Map(cacheFolders.map((f) => [f.moduleId, f.folderName]));
+
+    const OUTPUT_FILES_BY_TYPE: Record<string, string[]> = {
+      'video.compress': ['output.mp4'],
+      'video.crop': ['crop_output.mp4', 'output.mp4'],
+      'llm.openrouter.vision': ['output.md', 'output.txt'],
+    };
+
+    for (const mod of modules) {
+      if (!mod.outputs) continue;
+      const folderName = folderByModuleId.get(mod.id);
+      if (!folderName) continue;
+
+      const candidates = OUTPUT_FILES_BY_TYPE[mod.type] ?? ['output.mp4', 'output.txt', 'output.md'];
+      let foundFile: string | null = null;
+      try {
+        const entries = await listWorkflowCacheFolderContents(projectId, videoId, folderName);
+        for (const c of candidates) {
+          if (entries.some((e) => e.type === 'file' && e.name === c)) {
+            foundFile = c;
+            break;
+          }
+        }
+        if (!foundFile && entries.some((e) => e.type === 'file')) {
+          const first = entries.find((e) => e.type === 'file');
+          if (first) foundFile = first.name;
+        }
+      } catch {
+        /* folder not found or empty */
+      }
+
+      if (foundFile) {
+        const fileUrl = `/api/projects/${projectId}/videos/${videoId}/workflow-cache/${encodeURIComponent(folderName)}/file?path=${encodeURIComponent(foundFile)}`;
+        for (const [slotKey, varName] of Object.entries(mod.outputs)) {
+          if (!varName) continue;
+          const isText = mod.type === 'llm.openrouter.vision' || foundFile.endsWith('.txt') || foundFile.endsWith('.md');
+          values[varName] = {
+            value: fileUrl,
+            preview: isText ? '(text file)' : '(video file)',
+            url: fileUrl,
+          };
+        }
+      }
+    }
+
+    return reply.send({ variables: values });
+  });
+
   fastify.get('/:id/videos/:videoId/workflow-cache', async (request, reply) => {
     const { id: projectId, videoId } = request.params as { id: string; videoId: string };
     const project = await db.query.projects.findFirst({

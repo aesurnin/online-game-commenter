@@ -1,7 +1,7 @@
 import { useRef, useState, useEffect } from "react"
 import { useLocation } from "react-router-dom"
 import { Group, Panel, Separator } from "react-resizable-panels"
-import { PanelRightOpen, Trash2 } from "lucide-react"
+import { PanelRightOpen, Trash2, Copy } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { LogsPanel } from "@/components/LogsPanel"
 import { WorkflowEditor } from "@/components/WorkflowEditor"
@@ -138,20 +138,53 @@ export function RightPanel({
   )
 }
 
+function formatLogTime(d: Date) {
+  return d.toLocaleTimeString("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  })
+}
+
 function LogsPanelHeader() {
-  const { clearLogs } = useLogs()
+  const { logs, clearLogs } = useLogs()
+  const [copied, setCopied] = useState(false)
+
+  const copyAllLogs = async () => {
+    if (logs.length === 0) return
+    const text = logs
+      .map((log) => `${formatLogTime(log.timestamp)} ${log.message}`)
+      .join("\n")
+    await navigator.clipboard.writeText(text)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 1500)
+  }
+
   return (
     <div className="flex items-center justify-between px-2 py-2 border-b border-border/50 shrink-0" style={{ height: 32 }}>
       <span className="text-xs text-muted-foreground/70 font-medium">LOGS</span>
-      <Button
-        variant="ghost"
-        size="icon"
-        className="h-6 w-6"
-        onClick={clearLogs}
-        title="Clear logs"
-      >
-        <Trash2 className="h-3.5 w-3.5" />
-      </Button>
+      <div className="flex items-center gap-0.5">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-6 w-6"
+          onClick={copyAllLogs}
+          disabled={logs.length === 0}
+          title={copied ? "Copied!" : "Copy all logs"}
+        >
+          <Copy className="h-3.5 w-3.5" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-6 w-6"
+          onClick={clearLogs}
+          title="Clear logs"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </Button>
+      </div>
     </div>
   )
 }

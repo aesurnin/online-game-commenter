@@ -9,6 +9,7 @@ import {
   isCancelRequested,
   clearCancelRequest,
 } from '../lib/workflow-job-store.js';
+import { appendVideoLog } from '../lib/video-logs-store.js';
 import type { WorkflowJobData } from '../lib/queue.js';
 import type { WorkflowDefinition } from '../lib/workflow/types.js';
 
@@ -58,7 +59,10 @@ async function processWorkflowJob(job: Job<WorkflowJobData>) {
         state.progress = pct;
         state.message = msg;
       },
-      onLog: (msg) => appendJobLog(jobId, msg),
+      onLog: (msg) => {
+        appendJobLog(jobId, msg);
+        appendVideoLog(videoId, msg);
+      },
       onCheckCancel: () => isCancelRequested(jobId),
       signal: abortController.signal,
     });
@@ -91,7 +95,9 @@ async function processWorkflowJob(job: Job<WorkflowJobData>) {
         const outputUrl = await getPresignedUrl(key, 3600);
         updateJob(jobId, { outputUrl });
       } catch (e) {
-        appendJobLog(jobId, `Upload failed: ${e}`);
+        const msg = `Upload failed: ${e}`;
+        appendJobLog(jobId, msg);
+        appendVideoLog(videoId, msg);
       }
     }
 

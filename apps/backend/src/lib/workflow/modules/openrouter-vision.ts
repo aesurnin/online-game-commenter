@@ -172,9 +172,20 @@ export class OpenRouterVisionModule implements WorkflowModule {
   async run(context: WorkflowContext, params: Record<string, unknown>): Promise<ModuleRunResult> {
     const { onProgress, onLog } = context;
     const inputPaths = context.inputPaths ?? {};
-    
+
+    onLog?.('[OpenRouter Vision] === Module start ===');
+    onLog?.(`[OpenRouter Vision] inputPaths keys: ${JSON.stringify(Object.keys(inputPaths))}`);
+    for (const [k, v] of Object.entries(inputPaths)) {
+      onLog?.(`[OpenRouter Vision] inputPaths["${k}"] = "${v}"`);
+    }
+    onLog?.(`[OpenRouter Vision] context.variables keys: ${JSON.stringify(Object.keys(context.variables ?? {}))}`);
+    for (const [k, v] of Object.entries(context.variables ?? {})) {
+      const preview = typeof v === 'string' && v.length > 80 ? `${v.slice(0, 80)}...` : v;
+      onLog?.(`[OpenRouter Vision] variables["${k}"] = "${preview}"`);
+    }
+
     const promptTemplate = String(params.prompt ?? 'Describe the provided media.').trim();
-    onLog?.('Resolving prompt placeholders...');
+    onLog?.('[OpenRouter Vision] Resolving prompt placeholders...');
     const prompt = await resolvePromptPlaceholders(promptTemplate, context.variables);
     
     const apiKeyEnvVar = String(params.apiKeyEnvVar ?? 'OPENROUTER_API_KEY').trim();
@@ -202,74 +213,104 @@ export class OpenRouterVisionModule implements WorkflowModule {
 
     // Collect all media inputs (media_0, media_1, etc.)
     const mediaKeys = Object.keys(inputPaths).filter(k => k.startsWith('media_')).sort();
-    onLog?.(`Found ${mediaKeys.length} media input(s) to process.`);
+    onLog?.(`[OpenRouter Vision] Found ${mediaKeys.length} media input(s) to process: ${mediaKeys.join(', ')}`);
 
     for (const [idx, key] of mediaKeys.entries()) {
       const filePath = inputPaths[key];
-      if (!filePath) continue;
+      onLog?.(`[OpenRouter Vision] [Input ${idx + 1}] Processing "${key}" -> path: "${filePath}"`);
 
+      if (!filePath) {
+        onLog?.(`[OpenRouter Vision] [Input ${idx + 1}] SKIP: filePath is empty or undefined`);
+        continue;
+      }
+
+      let stat: { size: number; exists: boolean } = { size: 0, exists: false };
       try {
-        await fs.access(filePath);
-      } catch {
-        onLog?.(`Warning: File for input "${key}" not found: ${filePath}`);
+        const s = await fs.stat(filePath);
+        stat = { size: s.size, exists: true };
+        onLog?.(`[OpenRouter Vision] [Input ${idx + 1}] File exists, size: ${(s.size / 1024).toFixed(1)} KB`);
+      } catch (e) {
+        onLog?.(`[OpenRouter Vision] [Input ${idx + 1}] WARNING: File not found or not accessible: ${filePath}`);
+        onLog?.(`[OpenRouter Vision] [Input ${idx + 1}] Error: ${e instanceof Error ? e.message : String(e)}`);
         continue;
       }
 
       const ext = path.extname(filePath).toLowerCase();
       const isVideo = ['.mp4', '.webm', '.mov', '.mkv'].includes(ext);
+      onLog?.(`[OpenRouter Vision] [Input ${idx + 1}] Extension: "${ext}", isVideo: ${isVideo}, isGemini: ${isGemini}`);
 
       if (isVideo) {
         if (isGemini) {
-          onLog?.(`[Input ${idx+1}] Sending video file directly (native support)...`);
+          onLog?.(`[OpenRouter Vision] [Input ${idx + 1}] Sending video file directly (Gemini native support)...`);
           try {
             const buf = await fs.readFile(filePath);
+            const b64Len = buf.toString('base64').length;
+            onLog?.(`[OpenRouter Vision] [Input ${idx + 1}] Video read: ${(buf.length / 1024).toFixed(1)} KB raw, base64 length: ${(b64Len / 1024).toFixed(1)} KB`);
             content.push({
               type: 'video_url',
               video_url: { url: `data:video/mp4;base64,${buf.toString('base64')}` },
             });
+            onLog?.(`[OpenRouter Vision] [Input ${idx + 1}] Video part added to content (type: video_url)`);
           } catch (e) {
-            onLog?.(`[Input ${idx+1}] Failed to read video: ${e}`);
+            onLog?.(`[OpenRouter Vision] [Input ${idx + 1}] FAILED to read video: ${e instanceof Error ? e.message : String(e)}`);
           }
         } else {
-          onLog?.(`[Input ${idx+1}] Non-Gemini model. Extracting frames for video...`);
+          onLog?.(`[OpenRouter Vision] [Input ${idx + 1}] Non-Gemini model. Extracting frames for video...`);
           try {
             const duration = await getVideoDuration(filePath, context.signal);
-            onLog?.(`[Input ${idx+1}] Video duration: ${duration.toFixed(1)}s. Sampling 1 fps.`);
+            onLog?.(`[OpenRouter Vision] [Input ${idx + 1}] Video duration: ${duration.toFixed(1)}s. Sampling 1 fps.`);
             const frameCount = Math.min(Math.max(1, Math.ceil(duration)), 100);
+            onLog?.(`[OpenRouter Vision] [Input ${idx + 1}] Extracting ${frameCount} frame(s)...`);
             const frames = await extractFrames(filePath, frameCount, duration, context.signal);
-            onLog?.(`[Input ${idx+1}] Extracted ${frames.length} frames.`);
+            onLog?.(`[OpenRouter Vision] [Input ${idx + 1}] Extracted ${frames.length} frame(s). Adding to content.`);
             for (const b64 of frames) {
               content.push({
                 type: 'image_url',
                 image_url: { url: `data:image/jpeg;base64,${b64}` },
               });
             }
+            onLog?.(`[OpenRouter Vision] [Input ${idx + 1}] Added ${frames.length} image parts to content`);
           } catch (e) {
-            onLog?.(`[Input ${idx+1}] Frame extraction failed: ${e}`);
+            onLog?.(`[OpenRouter Vision] [Input ${idx + 1}] Frame extraction FAILED: ${e instanceof Error ? e.message : String(e)}`);
           }
         }
       } else {
-        // Assume image
-        onLog?.(`[Input ${idx+1}] Processing as image...`);
+        onLog?.(`[OpenRouter Vision] [Input ${idx + 1}] Processing as image...`);
         try {
           const { url } = await readImageOrVideoFrame(filePath, context.signal);
+          const urlLen = url.length;
           content.push({ type: 'image_url', image_url: { url } });
+          onLog?.(`[OpenRouter Vision] [Input ${idx + 1}] Image part added (data URL length: ${(urlLen / 1024).toFixed(1)} KB)`);
         } catch (e) {
-          onLog?.(`[Input ${idx+1}] Failed to read image: ${e}`);
+          onLog?.(`[OpenRouter Vision] [Input ${idx + 1}] FAILED to read image: ${e instanceof Error ? e.message : String(e)}`);
         }
       }
     }
 
+    const mediaPartCount = content.length - 1;
+    const contentTypes = content.map((c) => c.type);
+    onLog?.(`[OpenRouter Vision] Content summary: ${content.length} part(s) total. Types: ${contentTypes.join(', ')}`);
+
     if (content.length === 1) {
-      onLog?.('No media parts added. Sending text-only prompt.');
+      onLog?.('[OpenRouter Vision] WARNING: No media parts added. Sending text-only prompt. LLM will NOT see any video/image.');
     } else {
-      onLog?.(`Payload prepared with ${content.length - 1} media part(s).`);
+      onLog?.(`[OpenRouter Vision] Payload prepared with ${mediaPartCount} media part(s).`);
     }
 
     onProgress?.(40, 'Calling OpenRouter');
-    onLog?.(`Sending request to OpenRouter (model: ${model})...`);
-    const bodySize = JSON.stringify(content).length;
-    onLog?.(`Request body size: ${(bodySize / 1024).toFixed(1)} KB`);
+    const requestBody = {
+      model,
+      messages: [{ role: 'user', content }],
+      max_tokens: maxTokens,
+      temperature,
+    };
+    const bodyStr = JSON.stringify(requestBody);
+    const bodySize = bodyStr.length;
+    onLog?.(`[OpenRouter Vision] Sending request to OpenRouter (model: ${model})...`);
+    onLog?.(`[OpenRouter Vision] Request body size: ${(bodySize / 1024).toFixed(1)} KB (${(bodySize / 1024 / 1024).toFixed(2)} MB)`);
+    if (bodySize > 4 * 1024 * 1024) {
+      onLog?.(`[OpenRouter Vision] WARNING: Body > 4 MB. Some APIs may truncate or reject large payloads.`);
+    }
 
     const timeoutMs = 300_000; // 5 min for large video uploads
     const fetchController = new AbortController();
@@ -292,16 +333,11 @@ export class OpenRouterVisionModule implements WorkflowModule {
           'X-Title': 'Online Game Commenter',
         },
         signal: fetchController.signal,
-        body: JSON.stringify({
-          model,
-          messages: [{ role: 'user', content }],
-          max_tokens: maxTokens,
-          temperature,
-        }),
+        body: bodyStr,
       });
     } catch (e) {
       clearTimeout(timeoutId);
-      onLog?.(`Request failed: ${e}`);
+      onLog?.(`[OpenRouter Vision] Request FAILED: ${e instanceof Error ? e.message : String(e)}`);
       const msg = e instanceof Error && e.name === 'AbortError'
         ? 'Request aborted (timeout or cancelled)'
         : String(e);
@@ -309,15 +345,21 @@ export class OpenRouterVisionModule implements WorkflowModule {
     }
     clearTimeout(timeoutId);
 
+    onLog?.(`[OpenRouter Vision] Response status: ${res.status} ${res.statusText}`);
+
     if (!res.ok) {
       const errText = await res.text();
-      onLog?.(`Error from OpenRouter: ${res.status} ${errText}`);
+      onLog?.(`[OpenRouter Vision] Error from OpenRouter: ${res.status} ${errText.slice(0, 500)}`);
       return { success: false, error: `OpenRouter error ${res.status}: ${errText.slice(0, 500)}` };
     }
 
     const data = await res.json() as any;
     const text = data?.choices?.[0]?.message?.content?.trim() ?? '';
-    onLog?.('Response received from OpenRouter.');
+    const choiceCount = data?.choices?.length ?? 0;
+    onLog?.(`[OpenRouter Vision] Response received. choices: ${choiceCount}, content length: ${text.length} chars`);
+    if (text.length === 0 && choiceCount > 0) {
+      onLog?.(`[OpenRouter Vision] WARNING: Response has choices but empty content. finish_reason: ${data?.choices?.[0]?.finish_reason ?? 'unknown'}`);
+    }
 
     onProgress?.(90, 'Writing output');
     const outDir = context.moduleCacheDir ?? context.tempDir;
@@ -327,6 +369,7 @@ export class OpenRouterVisionModule implements WorkflowModule {
     onLog?.(`Result saved to output${ext}`);
 
     onProgress?.(100, 'Done');
+    onLog?.(`[OpenRouter Vision] === Module complete. Output: ${outputPath} ===`);
     return {
       success: true,
       context: { currentTextOutputPath: outputPath },

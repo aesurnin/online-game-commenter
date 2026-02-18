@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { CropModal } from "@/components/CropModal"
 import { PromptBuilderModal } from "@/components/PromptBuilderModal"
+import { VariableManagerModal } from "@/components/VariableManagerModal"
 import {
   Plus,
   Trash2,
@@ -21,11 +22,13 @@ import {
   Pencil,
   PlusCircle,
   MinusCircle,
+  Database,
 } from "lucide-react"
 import { useSelectedVideo } from "@/contexts/SelectedVideoContext"
 import { useLogs } from "@/contexts/LogsContext"
 import { usePreviewVideo } from "@/contexts/PreviewVideoContext"
 import { useAddStepPanel } from "@/contexts/AddStepPanelContext"
+import { useWorkflowVariable } from "@/contexts/WorkflowVariableContext"
 
 type WorkflowModuleDef = {
   id: string
@@ -149,6 +152,7 @@ function generateId() {
 export function WorkflowEditor() {
   const { selectedVideo, refreshAssets } = useSelectedVideo()
   const { addLog } = useLogs()
+  const workflowVariable = useWorkflowVariable()
   const { setPreviewVideo } = usePreviewVideo()
   const { openAddStepPanel, closeAddStepPanel, setOnSelectModule } = useAddStepPanel()
   const [workflows, setWorkflows] = useState<{ id: string; name?: string }[]>([])
@@ -160,6 +164,7 @@ export function WorkflowEditor() {
   const [cropModalOpen, setCropModalOpen] = useState(false)
   const [cropModuleIndex, setCropModuleIndex] = useState<number | null>(null)
   const [openPromptBuilder, setOpenPromptBuilder] = useState<{ index: number; paramKey: string } | null>(null)
+  const [variableManagerOpen, setVariableManagerOpen] = useState(false)
   const [autoSave, setAutoSave] = useState(() => {
     try {
       return localStorage.getItem(AUTOSAVE_KEY) !== "false"
@@ -225,6 +230,20 @@ export function WorkflowEditor() {
     fetchWorkflows()
     fetchModuleTypes()
   }, [fetchWorkflows, fetchModuleTypes])
+
+  const workflowDataRef = useRef<string>("")
+  useEffect(() => {
+    if (!workflowVariable) return
+    const key = workflow
+      ? `${workflow.name}-${JSON.stringify(workflow.modules?.map((m) => ({ id: m.id, outputs: m.outputs })))}`
+      : ""
+    if (workflowDataRef.current === key) return
+    workflowDataRef.current = key
+    workflowVariable.setWorkflowData(
+      workflow ? { name: workflow.name, modules: workflow.modules } : null,
+      moduleTypes
+    )
+  }, [workflow, moduleTypes, workflowVariable])
 
   useEffect(() => {
     if (!projectId || !videoId) return
@@ -540,6 +559,22 @@ export function WorkflowEditor() {
     updateVideoState(videoId, { workflow: { ...workflow, modules: mods } })
   }
 
+  /** Rename variable globally: replace oldName with newName in all module inputs and outputs. */
+  const renameVariableInWorkflow = (oldName: string, newName: string) => {
+    if (!videoId || !workflow || !oldName || !newName || oldName === newName || oldName === "source") return
+    const mods = workflow.modules.map((m) => {
+      const replace = (v: string) => (v === oldName ? newName : v)
+      const inputs = m.inputs
+        ? Object.fromEntries(Object.entries(m.inputs).map(([k, v]) => [k, replace(v)]))
+        : undefined
+      const outputs = m.outputs
+        ? Object.fromEntries(Object.entries(m.outputs).map(([k, v]) => [k, replace(v)]))
+        : undefined
+      return { ...m, ...(inputs && { inputs }), ...(outputs && { outputs }) }
+    })
+    updateVideoState(videoId, { workflow: { ...workflow, modules: mods } })
+  }
+
   const getAvailableVariablesForModule = (moduleIndex: number): string[] => {
     const vars = new Set<string>(["source"])
     for (let i = 0; i < moduleIndex; i++) {
@@ -759,6 +794,15 @@ export function WorkflowEditor() {
             <Button variant="ghost" size="sm" className="h-8 px-2" onClick={importWorkflow} title="Import">
               <FileUp className="h-3.5 w-3.5" />
             </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8 px-2"
+              onClick={() => setVariableManagerOpen(true)}
+              title="Variable Manager"
+            >
+              <Database className="h-3.5 w-3.5" />
+            </Button>
           </div>
         </div>
       </div>
@@ -839,6 +883,7 @@ export function WorkflowEditor() {
                   onParamsChange={(params) => updateModuleParams(idx, params)}
                   onInputsChange={(inputs) => updateModuleInputs(idx, inputs)}
                   onOutputsChange={(outputs) => updateModuleOutputs(idx, outputs)}
+                  onRenameVariable={renameVariableInWorkflow}
                   onRunStep={() => runStep(idx)}
                   onPreview={() => stepOutputUrls[idx] && handlePreview(stepOutputUrls[idx], `Step ${idx + 1}`, stepOutputContentTypes[idx])}
                   getModuleLabel={getModuleLabel}
@@ -900,6 +945,13 @@ export function WorkflowEditor() {
           onTestCrop={handleTestCrop}
         />
       )}
+
+      <VariableManagerModal
+        isOpen={variableManagerOpen}
+        onClose={() => setVariableManagerOpen(false)}
+        workflow={workflow}
+        moduleTypes={moduleTypes}
+      />
     </div>
   )
 }
@@ -918,6 +970,7 @@ function ModuleBlock({
   onParamsChange,
   onInputsChange,
   onOutputsChange,
+  onRenameVariable,
   onRunStep,
   onPreview,
   getModuleLabel,
@@ -938,6 +991,7 @@ function ModuleBlock({
   onParamsChange: (params: Record<string, unknown>) => void
   onInputsChange: (inputs: Record<string, string>) => void
   onOutputsChange: (outputs: Record<string, string>) => void
+  onRenameVariable?: (oldName: string, newName: string) => void
   onRunStep: () => void
   onPreview: () => void
   getModuleLabel: (type: string) => string
@@ -949,6 +1003,7 @@ function ModuleBlock({
   const params = module.params ?? {}
   const paramsSchema = meta?.paramsSchema ?? []
   const paramsToShow = expanded ? paramsSchema : []
+  const outputFocusValueRef = useRef<Record<string, string>>({})
 
   const StatusIcon = () => {
     if (status === "running") return <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -1139,7 +1194,7 @@ function ModuleBlock({
                     )}
                     {getAvailableVariables().map((v) => (
                       <option key={v} value={v}>
-                        {v}
+                        ({v})
                       </option>
                     ))}
                   </select>
@@ -1168,20 +1223,34 @@ function ModuleBlock({
       {expanded && (meta?.outputSlots?.length ?? 0) > 0 && (
         <div className="space-y-2 mb-3 pt-2 border-t">
           <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Outputs</span>
-          {meta!.outputSlots!.map((slot) => (
-            <div key={slot.key} className="flex items-center gap-2">
-              <label className="text-xs text-muted-foreground w-20 shrink-0">{slot.label}</label>
-              <Input
-                type="text"
-                className="h-7 text-xs flex-1"
-                placeholder={`e.g. video_${index + 1}`}
-                value={module.outputs?.[slot.key] ?? ""}
-                onChange={(e) =>
-                  onOutputsChange({ ...(module.outputs ?? {}), [slot.key]: e.target.value })
-                }
-              />
-            </div>
-          ))}
+          {meta!.outputSlots!.map((slot) => {
+            const slotKey = slot.key
+            const currentVal = module.outputs?.[slotKey] ?? ""
+            return (
+              <div key={slotKey} className="flex items-center gap-2">
+                <label className="text-xs text-muted-foreground w-20 shrink-0">{slot.label}</label>
+                <div className="flex-1 flex items-center gap-1.5">
+                  <Input
+                    type="text"
+                    className={`h-7 text-xs flex-1 font-mono ${currentVal ? "bg-primary/5 border-primary/20" : ""}`}
+                    placeholder={`e.g. (video_${index + 1})`}
+                    value={currentVal}
+                    title={currentVal ? `Variable: (${currentVal})` : undefined}
+                    onFocus={() => { outputFocusValueRef.current[slotKey] = currentVal }}
+                    onChange={(e) => onOutputsChange({ ...(module.outputs ?? {}), [slotKey]: e.target.value })}
+                    onBlur={(e) => {
+                      const oldVal = outputFocusValueRef.current[slotKey]
+                      const newVal = e.target.value.trim()
+                      if (onRenameVariable && oldVal && newVal && oldVal !== newVal) {
+                        onRenameVariable(oldVal, newVal)
+                      }
+                      delete outputFocusValueRef.current[slotKey]
+                    }}
+                  />
+                </div>
+              </div>
+            )
+          })}
         </div>
       )}
       {paramsToShow.length > 0 && (

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useNavigate, useParams } from "react-router-dom"
 import { Group, Panel, Separator, usePanelRef } from "react-resizable-panels"
-import { Video, FolderOpen, GitBranch, FileText, Moon, Sun, Pencil, KeyRound } from "lucide-react"
+import { Video, FolderOpen, GitBranch, FileText, Moon, Sun, Pencil, KeyRound, Database } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Login } from "@/pages/Login"
@@ -17,6 +17,8 @@ import { ThemeProvider, useTheme } from "@/contexts/ThemeContext"
 import { ActivityBar } from "@/components/ActivityBar"
 import { RightPanel } from "@/components/RightPanel"
 import { EnvManagerModal } from "@/components/EnvManagerModal"
+import { VariableManagerModal } from "@/components/VariableManagerModal"
+import { WorkflowVariableProvider, useWorkflowVariable } from "@/contexts/WorkflowVariableContext"
 
 const LAYOUT_STORAGE_KEY = "app-layout-main-right"
 const PANELS_VISIBLE_KEY = "app-panels-visible"
@@ -35,6 +37,7 @@ function AppHeader() {
   const { theme, toggleTheme } = useTheme()
   const { addLog } = useLogs()
   const { id: projectId } = useParams<{ id: string }>()
+  const workflowVariable = useWorkflowVariable()
   const [project, setProject] = useState<{ id: string; name: string } | null>(null)
   const [editingProjectName, setEditingProjectName] = useState(false)
   const [envManagerOpen, setEnvManagerOpen] = useState(false)
@@ -114,6 +117,18 @@ function AppHeader() {
           )}
         </div>
         <div className="flex items-center gap-1">
+          {isProjectPage && workflowVariable && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1.5"
+              onClick={workflowVariable.openVariableManager}
+              title="Workflow variables"
+            >
+              <Database className="h-3.5 w-3.5" />
+              Variables
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="sm"
@@ -136,6 +151,14 @@ function AppHeader() {
         </div>
       </div>
       <EnvManagerModal isOpen={envManagerOpen} onClose={() => setEnvManagerOpen(false)} />
+      {workflowVariable && (
+        <VariableManagerModal
+          isOpen={workflowVariable.variableManagerOpen}
+          onClose={workflowVariable.closeVariableManager}
+          workflow={workflowVariable.workflow}
+          moduleTypes={workflowVariable.moduleTypes}
+        />
+      )}
     </header>
   )
 }
@@ -241,6 +264,7 @@ function AppLayout() {
   }
 
   return (
+    <WorkflowVariableProvider>
     <div className="h-screen overflow-hidden flex flex-col">
       <AppInit />
       <AppHeader />
@@ -340,6 +364,7 @@ function AppLayout() {
       </AddStepPanelProvider>
       </div>
     </div>
+    </WorkflowVariableProvider>
   )
 }
 

@@ -303,15 +303,19 @@ export async function runWorkflow(options: RunOptions): Promise<RunResult> {
       context.currentVideoPath = variables.source;
     }
 
+    const stepNum = i + 1;
     context.inputPaths = {};
     if (def.inputs) {
       for (const [slotKey, varName] of Object.entries(def.inputs)) {
         const p = variables[varName];
-        if (p && typeof p === 'string') context.inputPaths[slotKey] = p;
+        if (p && typeof p === 'string') {
+          context.inputPaths[slotKey] = p;
+          onLog?.(`[Runner] Step ${stepNum} input: ${slotKey} <- "${varName}" = "${p.slice(0, 60)}${p.length > 60 ? '...' : ''}"`);
+        } else {
+          onLog?.(`[Runner] Step ${stepNum} input: ${slotKey} <- "${varName}" (not set or empty)`);
+        }
       }
     }
-
-    const stepNum = i + 1;
     const totalSteps = endIdx - startIdx;
     const baseProgress = totalSteps > 0 ? (i / totalSteps) * 100 : 0;
     onLog?.(`[Step ${stepNum}] ${mod.meta.label} (${def.type})`);

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react"
-import { PanelRightClose, PanelRightOpen, Trash2 } from "lucide-react"
+import { PanelRightClose, PanelRightOpen, Trash2, Copy } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useLogs, type LogEntry, type LogLevel } from "@/contexts/LogsContext"
 
@@ -22,7 +22,18 @@ function formatTime(d: Date) {
 export function LogsPanel({ embedded, hideHeader }: { embedded?: boolean; hideHeader?: boolean } = {}) {
   const { logs, clearLogs } = useLogs()
   const [expanded, setExpanded] = useState(true)
+  const [copied, setCopied] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
+
+  const copyAllLogs = async () => {
+    if (logs.length === 0) return
+    const text = logs
+      .map((log) => `${formatTime(log.timestamp)} ${log.message}`)
+      .join("\n")
+    await navigator.clipboard.writeText(text)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 1500)
+  }
 
   useEffect(() => {
     scrollRef.current?.scrollTo({
@@ -55,6 +66,16 @@ export function LogsPanel({ embedded, hideHeader }: { embedded?: boolean; hideHe
             Logs
           </span>
           <div className="flex items-center gap-1">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              onClick={copyAllLogs}
+              disabled={logs.length === 0}
+              title={copied ? "Copied!" : "Copy all logs"}
+            >
+              <Copy className="h-3.5 w-3.5" />
+            </Button>
             <Button
               variant="ghost"
               size="icon"

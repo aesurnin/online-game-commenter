@@ -133,11 +133,11 @@ export function ProjectView({
   }, [selectedVideo?.id, setActiveVideoId])
 
   useEffect(() => {
-    if (!id || !selectedVideo || selectedVideo.status !== "processing") return
+    if (!id || !selectedVideo) return
     fetchLogsForVideo(id, selectedVideo.id)
     const interval = setInterval(() => fetchLogsForVideo(id, selectedVideo.id), 2000)
     return () => clearInterval(interval)
-  }, [id, selectedVideo?.id, selectedVideo?.status, fetchLogsForVideo])
+  }, [id, selectedVideo?.id, fetchLogsForVideo])
 
   useEffect(() => {
     if (!id) return
@@ -300,6 +300,7 @@ export function ProjectView({
           setVideos((prev) => [...prev, v])
           setSelectedVideo(v)
           setShowAddForm(false)
+          if (id) setGlobalSelectedVideo({ projectId: id, videoId: v.id, sourceUrl: v.sourceUrl, playUrl: v.playUrl, streamUrl: v.streamUrl })
           addLog(`Video uploaded: ${v.id.slice(0, 8)}...`, "info", v.id)
         } catch {
           addLog("Failed to parse upload response", "error")
@@ -338,6 +339,7 @@ export function ProjectView({
         setShowAddForm(false)
         setUrlInput("")
         setProviderMeta(null)
+        if (id) setGlobalSelectedVideo({ projectId: id, videoId: v.id, sourceUrl: v.sourceUrl, playUrl: v.playUrl, streamUrl: v.streamUrl })
         addLog(`Video added by URL: ${v.id.slice(0, 8)}...`, "info", v.id)
       } else {
         const err = await r.json().catch(() => ({}))

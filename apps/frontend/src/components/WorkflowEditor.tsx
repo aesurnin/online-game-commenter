@@ -3,7 +3,9 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { CropModal } from "@/components/CropModal"
 import { PromptBuilderModal } from "@/components/PromptBuilderModal"
+import { ScenarioEditorModal } from "@/components/ScenarioEditorModal"
 import { VariableManagerModal } from "@/components/VariableManagerModal"
+import { ConfirmDialog } from "@/components/ui/confirm-dialog"
 import {
   Plus,
   Trash2,
@@ -31,6 +33,7 @@ import {
 import { useSelectedVideo } from "@/contexts/SelectedVideoContext"
 import { useLogs } from "@/contexts/LogsContext"
 import { usePreviewVideo } from "@/contexts/PreviewVideoContext"
+import { useLiveRemotion } from "@/contexts/LiveRemotionContext"
 import { useAddStepPanel } from "@/contexts/AddStepPanelContext"
 import { useWorkflowVariable } from "@/contexts/WorkflowVariableContext"
 import { useWorkflowJob } from "@/contexts/WorkflowJobContext"
@@ -196,6 +199,7 @@ export function WorkflowEditor() {
   const workflowVariable = useWorkflowVariable()
   const { setAgentOverlay } = useWorkflowJob()
   const { setPreviewVideo } = usePreviewVideo()
+  const { liveRemotion, setLiveRemotion } = useLiveRemotion()
   const { openAddStepPanel, closeAddStepPanel, setOnSelectModule } = useAddStepPanel()
   const [workflows, setWorkflows] = useState<{ id: string; name?: string }[]>([])
   const [stateByVideo, setStateByVideo] = useState<Record<string, VideoWorkflowState>>({})
@@ -206,8 +210,11 @@ export function WorkflowEditor() {
   const [cropModalOpen, setCropModalOpen] = useState(false)
   const [cropModuleIndex, setCropModuleIndex] = useState<number | null>(null)
   const [openPromptBuilder, setOpenPromptBuilder] = useState<{ index: number; paramKey: string } | null>(null)
+  const [scenarioEditorOpen, setScenarioEditorOpen] = useState<number | null>(null)
   const [variableManagerOpen, setVariableManagerOpen] = useState(false)
+  const [clearCacheConfirmIndex, setClearCacheConfirmIndex] = useState<number | null>(null)
   const [stepMetadataByModuleId, setStepMetadataByModuleId] = useState<Record<string, { executionTimeMs?: number; costUsd?: number }>>({})
+  const [previewSlotsByModuleId, setPreviewSlotsByModuleId] = useState<Record<string, Array<{ key: string; kind: string; label?: string }>>>({})
   const [autoSave, setAutoSave] = useState(() => {
     try {
       return localStorage.getItem(AUTOSAVE_KEY) !== "false"
@@ -297,13 +304,61 @@ export function WorkflowEditor() {
   useEffect(() => {
     if (!projectId || !videoId) return
     const cached = loadFromCache(projectId, videoId)
-    if (cached) {
-      setStateByVideo((prev) => {
-        if (prev[videoId]) return prev
-        return { ...prev, [videoId]: { ...defaultVideoState(), ...cached } }
-      })
-    }
+    setStateByVideo((prev) => {
+      if (prev[videoId]) return prev
+      return { ...prev, [videoId]: { ...defaultVideoState(), ...cached } }
+    })
   }, [projectId, videoId])
+
+  /** Sync from backend cache (source of truth) after load. Fixes stale cache when user reloaded mid-job. */
+  useEffect(() => {
+    if (!projectId || !videoId || !workflow?.modules?.length) return
+    let cancelled = false
+    fetch(`/api/projects/${projectId}/videos/${videoId}/workflow-cache/state`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ workflow }),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { stepOutputUrls?: Record<number, string>; stepOutputContentTypes?: Record<number, string>; stepRemotionSceneUrls?: Record<number, string>; stepStatuses?: Record<number, string>; slotsByModuleId?: Record<string, Array<{ key: string; kind: string; label?: string }>> } | null) => {
+        if (cancelled || !data) return
+        if (data.slotsByModuleId && Object.keys(data.slotsByModuleId).length > 0) {
+          setPreviewSlotsByModuleId((prev) => ({ ...prev, ...data.slotsByModuleId }))
+        }
+        setStateByVideo((prev) => {
+          const s = prev[videoId] ?? defaultVideoState()
+          let changed = false
+          const next = { ...s }
+          if (data.stepOutputUrls && Object.keys(data.stepOutputUrls).length > 0) {
+            next.stepOutputUrls = { ...(s.stepOutputUrls ?? {}), ...data.stepOutputUrls }
+            changed = true
+          }
+          if (data.stepOutputContentTypes && Object.keys(data.stepOutputContentTypes).length > 0) {
+            next.stepOutputContentTypes = { ...(s.stepOutputContentTypes ?? {}), ...data.stepOutputContentTypes }
+            changed = true
+          }
+          if (data.stepRemotionSceneUrls) {
+            // Replace, don't merge — backend only returns Remotion URLs for video.render.remotion modules.
+            // Merging would keep stale URLs for steps that are now LLM Agent etc.
+            next.stepRemotionSceneUrls = data.stepRemotionSceneUrls
+            changed = true
+          }
+          if (data.stepStatuses && Object.keys(data.stepStatuses).length > 0) {
+            const merged: Record<number, StepStatus> = { ...s.stepStatuses }
+            for (const [k, v] of Object.entries(data.stepStatuses)) {
+              if (v === "done") merged[Number(k)] = "done"
+            }
+            next.stepStatuses = merged
+            changed = true
+          }
+          if (!changed) return prev
+          return { ...prev, [videoId]: next }
+        })
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [projectId, videoId, currentWorkflowId])
 
   const saveCacheRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
@@ -359,7 +414,10 @@ export function WorkflowEditor() {
           return
         }
         const job = await r.json()
-        if (projectIdRef.current && jobVideoId) {
+        // When job completes/fails, fetch logs first so they appear together with the status update
+        if ((job.status === "completed" || job.status === "failed") && projectIdRef.current && jobVideoId) {
+          await fetchLogsForVideo(projectIdRef.current, jobVideoId).catch(() => {})
+        } else if (projectIdRef.current && jobVideoId) {
           fetchLogsForVideo(projectIdRef.current, jobVideoId).catch(() => {})
         }
         setStateByVideo((prev) => {
@@ -388,6 +446,17 @@ export function WorkflowEditor() {
           const stepIndex = job.stepIndex
           if (job.status === "completed") {
             const idx = stepIndex ?? (wf?.modules.length ?? 0) - 1
+            const completedMod = wf?.modules?.[idx]
+            if (completedMod?.type === "llm.scenario.generator" && completedMod?.id && projectIdRef.current && jobVideoId) {
+              fetch(`/api/projects/${projectIdRef.current}/videos/${jobVideoId}/workflow-cache/slots/${encodeURIComponent(completedMod.id)}`, { credentials: "include" })
+                .then((r) => (r.ok ? r.json() : null))
+                .then((data: { slots?: Array<{ key: string; kind: string; label?: string }> } | null) => {
+                  if (data?.slots?.length && completedMod?.id) {
+                    setPreviewSlotsByModuleId((prev) => ({ ...prev, [completedMod.id]: data.slots! }))
+                  }
+                })
+                .catch(() => {})
+            }
             const stepOutputUrls = idx >= 0 && job.outputUrl ? { ...current.stepOutputUrls, [idx]: job.outputUrl } : current.stepOutputUrls
             const stepOutputContentTypes = idx >= 0 && job.outputContentType ? { ...current.stepOutputContentTypes, [idx]: job.outputContentType } : current.stepOutputContentTypes
             const stepRemotionSceneUrls = idx >= 0 && job.remotionSceneUrl ? { ...(current.stepRemotionSceneUrls ?? {}), [idx]: job.remotionSceneUrl } : (current.stepRemotionSceneUrls ?? {})
@@ -430,7 +499,7 @@ export function WorkflowEditor() {
         // ignore
       }
     },
-    [addLog, fetchLogsForVideo]
+    [addLog, fetchLogsForVideo, setPreviewSlotsByModuleId]
   )
 
   useEffect(() => {
@@ -472,7 +541,7 @@ export function WorkflowEditor() {
       })
       .catch(() => {})
     return () => { cancelled = true }
-  }, [projectId, videoId, stepStatuses, lastTotalExecutionTimeMs, lastTotalCostUsd, updateVideoState])
+  }, [projectId, videoId, stepStatuses, activeJobId, lastTotalExecutionTimeMs, lastTotalCostUsd, updateVideoState])
 
   useEffect(() => {
     if (!setAgentOverlay) return
@@ -700,6 +769,31 @@ export function WorkflowEditor() {
     if (!projectId || !videoId || !workflow) return
     const mod = workflow.modules[index]
     if (!mod?.id) return
+
+    const nextStepOutputUrls = { ...stepOutputUrls }
+    delete nextStepOutputUrls[index]
+    const nextStepOutputContentTypes = { ...stepOutputContentTypes }
+    delete nextStepOutputContentTypes[index]
+    const nextStepRemotionSceneUrls = { ...stepRemotionSceneUrls }
+    delete nextStepRemotionSceneUrls[index]
+    const nextStepStatuses = { ...stepStatuses, [index]: "pending" as const }
+
+    const stateToSave: VideoWorkflowState = {
+      ...videoState,
+      stepOutputUrls: nextStepOutputUrls,
+      stepOutputContentTypes: nextStepOutputContentTypes,
+      stepRemotionSceneUrls: nextStepRemotionSceneUrls,
+      stepStatuses: nextStepStatuses,
+    }
+    saveToCache(projectId, videoId, stateToSave)
+
+    updateVideoState(videoId, {
+      stepOutputUrls: nextStepOutputUrls,
+      stepOutputContentTypes: nextStepOutputContentTypes,
+      stepRemotionSceneUrls: nextStepRemotionSceneUrls,
+      stepStatuses: nextStepStatuses,
+    })
+
     fetch(`/api/projects/${projectId}/videos/${videoId}/workflow-cache/cleanup`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -717,9 +811,6 @@ export function WorkflowEditor() {
       })
       .then(() => refreshAssets())
       .catch(() => {})
-    updateVideoState(videoId, {
-      stepStatuses: { ...stepStatuses, [index]: "pending" },
-    })
     addLog(`Cache cleared for step ${index + 1}: ${mod.type}`, "info", videoId)
   }
 
@@ -742,6 +833,17 @@ export function WorkflowEditor() {
     const mods = [...workflow.modules]
     mods[index] = { ...mods[index], params }
     updateVideoState(videoId, { workflow: { ...workflow, modules: mods } })
+    if (liveRemotion.moduleIndex === index && mods[index].type === "video.render.remotion" && String(params.sceneSource ?? mods[index].params?.sceneSource ?? "variable") === "inline") {
+      const jsonStr = String(params.sceneJsonInline ?? "").trim()
+      if (jsonStr) {
+        try {
+          const sceneData = JSON.parse(jsonStr) as Record<string, unknown>
+          setLiveRemotion(index, sceneData)
+        } catch {
+          /* invalid JSON, keep previous scene */
+        }
+      }
+    }
   }
 
   const updateModuleInputs = (index: number, inputs: Record<string, string>) => {
@@ -873,6 +975,31 @@ export function WorkflowEditor() {
     }
   }
 
+  const generateScenarioForModal = useCallback(async (prompt: string, params: Record<string, unknown>): Promise<{ json: Record<string, unknown>; slots: Array<{ key: string; kind: string; label?: string }> } | { error: string }> => {
+    if (!projectId || !videoId) return { error: "No project or video" }
+    addLog("Generating scenario...", "info", videoId)
+    try {
+      const r = await fetch(`/api/projects/${projectId}/videos/${videoId}/generate-scenario`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ prompt, params }),
+      })
+      const data = await r.json().catch(async () => ({ error: await r.text().catch(() => String(r.status)) }))
+      if (r.ok && data.json && data.slots) {
+        addLog(`Scenario generated: ${data.slots.length} slot(s)`, "info", videoId)
+        return { json: data.json, slots: data.slots }
+      }
+      const err = data.error || String(r.status)
+      addLog(`Scenario generation failed: ${err}`, "error", videoId)
+      return { error: err }
+    } catch (e) {
+      const msg = String(e)
+      addLog(`Scenario generation failed: ${msg}`, "error", videoId)
+      return { error: msg }
+    }
+  }, [projectId, videoId, addLog])
+
   const exportWorkflow = () => {
     if (!workflow) return
     const blob = new Blob([JSON.stringify(workflow, null, 2)], {
@@ -914,7 +1041,9 @@ export function WorkflowEditor() {
 
   const handlePreview = (url: string, label: string, contentType?: string, moduleType?: string, remotionSceneUrl?: string) => {
     const base = { url, label, contentType: contentType ?? "video/mp4" }
-    const sceneUrl = remotionSceneUrl ?? (moduleType === "video.render.remotion" && url.includes("/file?") ? url.replace(/path=[^&]+/, "path=scene.json") : undefined)
+    // Only use Remotion scene URL for video.render.remotion — other modules (LLM Agent, etc.) don't have scene.json
+    const isRemotion = moduleType === "video.render.remotion"
+    const sceneUrl = isRemotion ? (remotionSceneUrl ?? (url.includes("/file?") ? url.replace(/path=[^&]+/, "path=scene.json") : undefined)) : undefined
     setPreviewVideo(sceneUrl ? { ...base, remotionSceneUrl: sceneUrl } : base)
   }
 
@@ -938,6 +1067,7 @@ export function WorkflowEditor() {
           contentType: "application/json",
           inlineRemotionScene: sceneData,
         })
+        setLiveRemotion(idx, sceneData)
       } catch {
         addLog("Invalid JSON in Scene JSON field — check the syntax.", "error", videoId ?? undefined)
       }
@@ -996,6 +1126,23 @@ export function WorkflowEditor() {
 
   return (
     <div className="flex flex-col h-full min-h-0 bg-panel-2">
+      <ConfirmDialog
+        open={clearCacheConfirmIndex !== null}
+        onOpenChange={(open) => !open && setClearCacheConfirmIndex(null)}
+        title="Clear cache"
+        message={
+          clearCacheConfirmIndex != null && workflow?.modules[clearCacheConfirmIndex]
+            ? `Clear cache for step ${clearCacheConfirmIndex + 1} (${workflow.modules[clearCacheConfirmIndex].type})? The step will need to be re-run.`
+            : "Clear cache for this step?"
+        }
+        confirmLabel="Clear cache"
+        variant="destructive"
+        onConfirm={() => {
+          if (clearCacheConfirmIndex != null) {
+            clearModuleCache(clearCacheConfirmIndex)
+          }
+        }}
+      />
       <div className="px-4 pt-3 pb-3 border-b shrink-0">
         <div className="flex items-center gap-3 flex-wrap">
           <select
@@ -1163,6 +1310,8 @@ export function WorkflowEditor() {
                   index={idx}
                   moduleTypes={moduleTypes}
                   status={stepStatuses[idx] ?? "pending"}
+                  projectId={projectId}
+                  videoId={videoId}
                   stepMetadata={stepMetadataByModuleId[mod.id]}
                   outputUrl={stepOutputUrls[idx]}
                   remotionSceneUrl={stepRemotionSceneUrls[idx]}
@@ -1176,7 +1325,7 @@ export function WorkflowEditor() {
                   onOutputsChange={(outputs) => updateModuleOutputs(idx, outputs)}
                   onRenameVariable={renameVariableInWorkflow}
                   onRunStep={() => runStep(idx)}
-                  onClearCache={() => clearModuleCache(idx)}
+                  onClearCache={() => setClearCacheConfirmIndex(idx)}
                   onPreview={() => stepOutputUrls[idx] && handlePreview(stepOutputUrls[idx], `Step ${idx + 1}`, stepOutputContentTypes[idx], mod.type, stepRemotionSceneUrls[idx])}
                   onScenePreview={
                     mod.type === "video.render.remotion"
@@ -1188,6 +1337,12 @@ export function WorkflowEditor() {
                   getAvailableVariablesByKind={(kind) => getAvailableVariablesByKindForModule(idx, kind)}
                   onOpenCrop={() => handleOpenCrop(idx)}
                   onOpenPromptBuilder={(paramKey) => setOpenPromptBuilder({ index: idx, paramKey })}
+                  previewSlots={mod.type === "llm.scenario.generator" ? previewSlotsByModuleId[mod.id] : undefined}
+                  onOpenScenarioEditor={
+                    mod.type === "llm.scenario.generator"
+                      ? () => setScenarioEditorOpen(idx)
+                      : undefined
+                  }
                 />
               ))}
               <div className="flex justify-center pt-1.5">
@@ -1221,6 +1376,27 @@ export function WorkflowEditor() {
             onChange={(v) => updateModuleParams(index, { ...params, [paramKey]: v })}
             availableVariables={getAvailableTextVariablesForModule(index)}
             label={paramLabel}
+          />
+        )
+      })()}
+
+      {scenarioEditorOpen !== null && workflow && (() => {
+        const idx = scenarioEditorOpen
+        const mod = workflow.modules[idx]
+        const params = mod?.params ?? {}
+        return (
+          <ScenarioEditorModal
+            isOpen={true}
+            onClose={() => setScenarioEditorOpen(null)}
+            initialPrompt={String(params.prompt ?? "")}
+            initialSceneJson={String(params.sceneJson ?? "")}
+            onSave={(prompt, sceneJson, slots) => {
+              updateModuleParams(idx, { ...params, prompt, sceneJson })
+              if (mod?.id && slots.length > 0) {
+                setPreviewSlotsByModuleId((prev) => ({ ...prev, [mod.id]: slots }))
+              }
+            }}
+            onGenerate={(prompt) => generateScenarioForModal(prompt, params)}
           />
         )
       })()}
@@ -1262,6 +1438,8 @@ function ModuleBlock({
   stepMetadata,
   outputUrl,
   expanded,
+  projectId,
+  videoId,
   onToggleExpand,
   onRemove,
   onMoveUp,
@@ -1280,6 +1458,8 @@ function ModuleBlock({
   getAvailableVariablesByKind,
   onOpenCrop,
   onOpenPromptBuilder,
+  previewSlots,
+  onOpenScenarioEditor,
 }: {
   module: WorkflowModuleDef
   index: number
@@ -1288,6 +1468,8 @@ function ModuleBlock({
   stepMetadata?: { executionTimeMs?: number; costUsd?: number }
   outputUrl?: string
   expanded: boolean
+  projectId?: string
+  videoId?: string
   onToggleExpand: () => void
   onRemove: () => void
   onMoveUp: () => void
@@ -1306,15 +1488,41 @@ function ModuleBlock({
   getAvailableVariablesByKind: (kind: string) => string[]
   onOpenCrop?: () => void
   onOpenPromptBuilder?: (paramKey: string) => void
+  previewSlots?: Array<{ key: string; kind: string; label?: string }>
+  onOpenScenarioEditor?: () => void
 }) {
   const meta = moduleTypes.find((m) => m.type === module.type)
   const params = module.params ?? {}
   const paramsSchema = meta?.paramsSchema ?? []
+  const [scenarioSlots, setScenarioSlots] = useState<Array<{ key: string; kind: string; label?: string }> | null>(null)
+
+  useEffect(() => {
+    if (module.type !== "llm.scenario.generator" || !projectId || !videoId || status !== "done") {
+      setScenarioSlots(null)
+      return
+    }
+    let cancelled = false
+    fetch(`/api/projects/${projectId}/videos/${videoId}/workflow-cache/slots/${encodeURIComponent(module.id)}`, {
+      credentials: "include",
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { slots?: Array<{ key: string; kind: string; label?: string }> } | null) => {
+        if (cancelled || !data?.slots) return
+        setScenarioSlots(data.slots)
+      })
+      .catch(() => setScenarioSlots(null))
+    return () => { cancelled = true }
+  }, [module.type, module.id, projectId, videoId, status])
+
   const paramsToShow = expanded
     ? paramsSchema.filter((p) => {
         if (module.type === "video.render.remotion") {
           if (p.key === "sceneSource") return false
           if (p.key === "sceneJsonInline") return false
+        }
+        if (module.type === "llm.scenario.generator") {
+          if (p.key === "sceneJson") return false
+          if (p.key === "prompt") return false
         }
         return true
       })
@@ -1544,10 +1752,22 @@ function ModuleBlock({
           </Button>
         </div>
       </div>
-      {expanded && (meta?.inputSlots?.length ?? 0) > 0 && (
+      {expanded && ((meta?.inputSlots?.length ?? 0) > 0 || module.type === "llm.scenario.generator") && (
         <div className="space-y-2 mb-3 pt-2 border-t">
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Inputs</span>
+            {module.type === "llm.scenario.generator" && onOpenScenarioEditor && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs"
+                onClick={onOpenScenarioEditor}
+              >
+                <Pencil className="h-3.5 w-3.5 mr-1.5" />
+                Edit
+              </Button>
+            )}
             {meta?.allowDynamicInputs && (
               <Button
                 type="button"
@@ -1568,7 +1788,15 @@ function ModuleBlock({
             )}
           </div>
           {(() => {
-            const slots = [...(meta?.inputSlots ?? [])]
+            let slots: ModuleSlotDef[] = [...(meta?.inputSlots ?? [])]
+            const effectiveScenarioSlots = status === "done" ? (scenarioSlots ?? previewSlots) : (previewSlots ?? scenarioSlots)
+            if (module.type === "llm.scenario.generator" && effectiveScenarioSlots?.length) {
+              slots = [...slots, ...effectiveScenarioSlots.map((s) => ({
+                key: s.key,
+                label: s.label ?? s.key,
+                kind: s.kind === "audio" ? "file" : s.kind,
+              }))]
+            }
             if (meta?.allowDynamicInputs) {
               const extraKeys = Object.keys(module.inputs ?? {})
                 .filter(k => k.startsWith("media_") && !slots.some(s => s.key === k))
@@ -1579,7 +1807,12 @@ function ModuleBlock({
               }
             }
 
-            return slots.map((slot) => {
+            return (
+              <>
+                {module.type === "llm.scenario.generator" && !effectiveScenarioSlots?.length && (
+                  <p className="text-xs text-muted-foreground py-1">Click Edit to open the scenario editor — enter JSON manually or use Generate from prompt.</p>
+                )}
+                {slots.map((slot) => {
               if (module.type === "video.render.remotion" && slot.key === "scene") {
                 const sceneSource = String(params.sceneSource ?? "variable")
                 return (
@@ -1669,7 +1902,9 @@ function ModuleBlock({
                 </div>
               </div>
               )
-            })
+            })}
+              </>
+            )
           })()}
         </div>
       )}

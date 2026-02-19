@@ -6,16 +6,20 @@ import { bundle } from '@remotion/bundler';
 import { renderMedia, selectComposition } from '@remotion/renderer';
 import type { WorkflowContext, WorkflowModule, ModuleRunResult } from '../types.js';
 
-/** Scene clip from JSON */
+/** Scene clip from JSON - video, text overlay, or audio */
 interface SceneClip {
   type: string;
-  src: string;
+  src?: string;
+  text?: string;
   from: number;
   durationInFrames: number;
   layout?: 'fill' | 'contain' | 'cover';
+  position?: 'bottom' | 'top' | 'center';
+  fontSize?: number;
+  color?: string;
 }
 
-/** Scene JSON schema */
+/** RemotionScene JSON schema - shared by renderer and player */
 interface SceneJson {
   width?: number;
   height?: number;
@@ -23,6 +27,9 @@ interface SceneJson {
   durationInFrames?: number;
   clips?: SceneClip[];
   backgroundColor?: string;
+  blurredBackground?: boolean;
+  blurredBackgroundRadius?: number;
+  blurredBackgroundScale?: number;
 }
 
 export const videoRenderRemotionMeta = {
@@ -45,6 +52,17 @@ export const videoRenderRemotionMeta = {
       ],
     },
     { key: 'sceneJsonInline', label: 'Scene JSON', type: 'json' as const, default: '' },
+    {
+      key: 'speedMode',
+      label: 'Render Speed',
+      type: 'string' as const,
+      default: 'normal',
+      options: [
+        { value: 'normal', label: 'Normal (best quality)' },
+        { value: 'fast', label: 'Fast (faster encode, HW accel)' },
+        { value: 'draft', label: 'Draft (half res, fastest)' },
+      ],
+    },
   ],
 };
 
@@ -109,6 +127,16 @@ function toRelativeUrl(absPath: string, videoDir: string): string | null {
   return path.relative(root, abs).replace(/\\/g, '/');
 }
 
+/** Resolve workflow-cache API URL to local path for static server */
+function resolveWorkflowCacheUrl(apiUrl: string, videoDir: string): string | null {
+  const m = apiUrl.match(/\/api\/projects\/([^/]+)\/videos\/([^/]+)\/workflow-cache\/([^/]+)\/file\?path=([^&]+)/);
+  if (!m) return null;
+  const [, projectId, videoId, folderName, pathParam] = m;
+  const decoded = decodeURIComponent(pathParam);
+  const localPath = path.join(videoDir, decodeURIComponent(folderName), decoded);
+  return localPath;
+}
+
 export class VideoRenderRemotionModule implements WorkflowModule {
   readonly meta = videoRenderRemotionMeta;
 
@@ -121,6 +149,16 @@ export class VideoRenderRemotionModule implements WorkflowModule {
     const sceneSource = String(params.sceneSource ?? 'variable');
     let scene: SceneJson;
 
+    /** Extract scene from LLM output format { slots, scene: { clips, ... } } or use as-is if flat */
+    function extractScene(parsed: unknown): SceneJson {
+      const obj = parsed as Record<string, unknown>;
+      const inner = (obj?.scene ?? obj) as SceneJson;
+      if (!inner || typeof inner !== 'object') {
+        throw new Error('JSON must have a "scene" object or flat scene fields (clips, width, etc.)');
+      }
+      return inner;
+    }
+
     if (sceneSource === 'inline') {
       const inlineJson = String(params.sceneJsonInline ?? '').trim();
       if (!inlineJson) {
@@ -128,7 +166,8 @@ export class VideoRenderRemotionModule implements WorkflowModule {
         return { success: false, error: 'Inline scene JSON is empty. Enter scene JSON or switch to Variable mode.' };
       }
       try {
-        scene = JSON.parse(inlineJson) as SceneJson;
+        const parsed = JSON.parse(inlineJson) as unknown;
+        scene = extractScene(parsed);
         onLog?.('[RemotionRender] Using inline scene JSON');
       } catch (e) {
         onLog?.(`[RemotionRender] ERROR: Invalid inline JSON: ${e}`);
@@ -158,16 +197,21 @@ export class VideoRenderRemotionModule implements WorkflowModule {
       }
 
       try {
-        scene = JSON.parse(sceneRaw) as SceneJson;
+        const parsed = JSON.parse(sceneRaw) as unknown;
+        scene = extractScene(parsed);
       } catch (e) {
         onLog?.(`[RemotionRender] ERROR: Invalid JSON: ${e}`);
         return { success: false, error: 'Scene file must be valid JSON.' };
       }
     }
 
+    /** Clone for URL modification; original scene has API URLs for scene.json (preview) */
+    const sceneForRender = JSON.parse(JSON.stringify(scene)) as SceneJson;
+
     const width = Math.max(320, Math.min(4096, Number(scene.width ?? 1920)));
     const height = Math.max(240, Math.min(2160, Number(scene.height ?? 1080)));
     const fps = Math.max(1, Math.min(60, Number(scene.fps ?? 30)));
+    const speedMode = String(params.speedMode ?? 'normal');
 
     const cacheBase = getWorkflowCacheBase();
     const videoDir = path.join(cacheBase, context.projectId, context.videoId);
@@ -175,7 +219,7 @@ export class VideoRenderRemotionModule implements WorkflowModule {
     let staticServer: http.Server | null = null;
     let baseUrl = '';
 
-    if (scene.clips?.length) {
+    if (sceneForRender.clips?.length) {
       onProgress?.(5, 'Starting asset server');
       try {
         const { server, port } = await createStaticServer(videoDir);
@@ -187,16 +231,48 @@ export class VideoRenderRemotionModule implements WorkflowModule {
         return { success: false, error: 'Failed to start asset server for assets.' };
       }
 
-      for (const clip of scene.clips) {
+      /** Prefer local video variables over remote placeholder URLs (e.g. BigBuckBunny from LLM examples) */
+      const videoVars = ['60sec_video', 'video_crop', 'video_1'] as const;
+      const fallbackVideoPath = videoVars
+        .map((v) => context.variables[v])
+        .find((p): p is string => typeof p === 'string' && p.length > 0);
+
+      for (const clip of sceneForRender.clips) {
+        let src = clip.type === 'video' ? clip.src : clip.type === 'audio' ? clip.src : undefined;
+        if (!src) continue;
+        // Resolve workflow-cache API URLs to local path for static server
+        if (src.startsWith('/api/projects/') && src.includes('workflow-cache')) {
+          const local = resolveWorkflowCacheUrl(src, videoDir);
+          if (local) src = local;
+        }
         if (clip.type === 'video' && clip.src) {
-          if (clip.src.startsWith('http://') || clip.src.startsWith('https://')) {
-            continue;
-          }
-          const rel = toRelativeUrl(clip.src, videoDir);
-          if (rel) {
-            clip.src = baseUrl + rel;
+          if (src.startsWith('http://') || src.startsWith('https://')) {
+            if (fallbackVideoPath && (src.includes('BigBuckBunny') || src.includes('sample/'))) {
+              onLog?.(`[RemotionRender] Replacing placeholder URL with local video: ${path.basename(fallbackVideoPath)}`);
+              clip.src = fallbackVideoPath;
+            } else {
+              onLog?.(`[RemotionRender] WARNING: Remote URL in clip (may timeout): ${src.slice(0, 80)}...`);
+              continue;
+            }
           } else {
-            onLog?.(`[RemotionRender] WARNING: Clip src not in cache dir, may fail: ${clip.src}`);
+            const rel = toRelativeUrl(src, videoDir);
+            if (rel) {
+              clip.src = baseUrl + rel;
+            } else {
+              onLog?.(`[RemotionRender] WARNING: Clip src not in cache dir, may fail: ${src}`);
+            }
+          }
+        }
+        if (clip.type === 'audio' && clip.src) {
+          if (!src.startsWith('http')) {
+            const rel = toRelativeUrl(src, videoDir);
+            if (rel) {
+              clip.src = baseUrl + rel;
+            } else {
+              onLog?.(`[RemotionRender] WARNING: Audio src not in cache dir, may fail: ${src}`);
+            }
+          } else {
+            clip.src = src;
           }
         }
       }
@@ -231,7 +307,7 @@ export class VideoRenderRemotionModule implements WorkflowModule {
       return { success: false, error: `Remotion bundle failed: ${msg}` };
     }
 
-    const inputProps = { scene: { ...scene, width, height, fps } };
+    const inputProps = { scene: { ...sceneForRender, width, height, fps } };
 
     let composition;
     try {
@@ -253,21 +329,46 @@ export class VideoRenderRemotionModule implements WorkflowModule {
 
     onProgress?.(20, 'Rendering video');
 
+    const baseOpts: Parameters<typeof renderMedia>[0] = {
+      composition,
+      serveUrl,
+      codec: 'h264',
+      outputLocation: outputPath,
+      inputProps,
+      onProgress: ({ progress }) => {
+        const pct = 20 + Math.round(progress * 78);
+        onProgress?.(pct, `Rendering ${pct}%`);
+      },
+      chromiumOptions: { headless: true },
+      /** OffthreadVideo must download full video before extracting frames; increase timeout for large/slow remote URLs */
+      timeoutInMilliseconds: 120_000,
+    };
+
+    const renderOpts =
+      speedMode === 'fast'
+        ? {
+            ...baseOpts,
+            concurrency: '100%' as const,
+            x264Preset: 'veryfast' as const,
+            hardwareAcceleration: 'if-possible' as const,
+            videoBitrate: '8M' as const,
+          }
+        : speedMode === 'draft'
+          ? {
+              ...baseOpts,
+              concurrency: '100%' as const,
+              x264Preset: 'ultrafast' as const,
+              hardwareAcceleration: 'if-possible' as const,
+              videoBitrate: '4M' as const,
+              scale: 0.5,
+            }
+          : baseOpts;
+
+    if (speedMode === 'fast') onLog?.('[RemotionRender] Speed mode: Fast (HW accel, veryfast preset)');
+    else if (speedMode === 'draft') onLog?.('[RemotionRender] Speed mode: Draft (half res, ultrafast)');
+
     try {
-      await renderMedia({
-        composition,
-        serveUrl,
-        codec: 'h264',
-        outputLocation: outputPath,
-        inputProps,
-        onProgress: ({ progress }) => {
-          const pct = 20 + Math.round(progress * 78);
-          onProgress?.(pct, `Rendering ${pct}%`);
-        },
-        chromiumOptions: {
-          headless: true,
-        },
-      });
+      await renderMedia(renderOpts);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       onLog?.(`[RemotionRender] ERROR: Render failed: ${msg}`);

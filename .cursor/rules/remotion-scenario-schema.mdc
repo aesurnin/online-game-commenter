@@ -1,0 +1,31 @@
+---
+description: When modifying Remotion SceneComposition, also update the LLM scenario generator prompt
+globs: "**/remotion-template/**/*.tsx,**/llm-scenario-generator.ts"
+alwaysApply: false
+---
+
+# Remotion SceneComposition ↔ LLM Scenario Generator Sync
+
+The LLM Scenario Generator (`llm.scenario.generator`) produces JSON that is consumed by Remotion's `SceneComposition`. The LLM does not know the schema — it reads it from `SCENARIO_SYSTEM_PROMPT` in `apps/backend/src/lib/workflow/modules/llm-scenario-generator.ts`.
+
+## When to update
+
+**When you add or change props in `SceneComposition.tsx`** (or related Remotion components):
+
+1. Update `SCENARIO_SYSTEM_PROMPT` in `llm-scenario-generator.ts` with the new/updated schema
+2. Document the field in the prompt (scene-level vs clip-level, types, defaults)
+
+## Source of truth
+
+- **Schema definition**: `apps/backend/remotion-template/src/SceneComposition.tsx` (interfaces `SceneVideoClip`, `SceneTextClip`, `SceneAudioClip`, `RemotionSceneProps`)
+- **LLM prompt**: `apps/backend/src/lib/workflow/modules/llm-scenario-generator.ts` — constant `SCENARIO_SYSTEM_PROMPT`
+
+## Current supported schema (as of last sync)
+
+**Scene-level**: width, height, fps, durationInFrames, backgroundColor, blurredBackground, blurredBackgroundRadius, blurredBackgroundScale, blurredBackgroundVolume, clips
+
+**Video clip**: type, src, from, durationInFrames, layout (fill|contain|cover), volume (0 = mute, 1 = normal, >1 = amplify)
+
+**Text clip**: type, text, from, durationInFrames, position (bottom|top|center), fontSize, color
+
+**Audio clip**: type, src, from, durationInFrames, volume (0 = mute, 1 = normal, >1 = amplify)

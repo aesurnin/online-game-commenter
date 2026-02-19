@@ -3,7 +3,7 @@ import { useNavigate, useParams } from "react-router-dom"
 import { Group, Panel, Separator } from "react-resizable-panels"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Plus, Trash2, Video, Upload, Link, Loader2, XCircle, Square, RotateCw } from "lucide-react"
+import { Plus, Trash2, Video, Upload, Link, Loader2, XCircle, Square, RotateCw, RefreshCw } from "lucide-react"
 import { AssetsPanel } from "@/components/AssetsPanel"
 import { UniversalViewer } from "@/components/UniversalViewer"
 import { useLogs } from "@/contexts/LogsContext"
@@ -98,7 +98,7 @@ export function ProjectView({
     return { videos: v, assets: a, main: m }
   })()
   const { addLog, setActiveVideoId, fetchLogsForVideo } = useLogs()
-  const { setSelectedVideo: setGlobalSelectedVideo } = useSelectedVideo()
+  const { setSelectedVideo: setGlobalSelectedVideo, refreshAssets } = useSelectedVideo()
   const { previewVideo, setPreviewVideo } = usePreviewVideo()
   const { addStepPanelOpen } = useAddStepPanel()
 
@@ -678,6 +678,13 @@ export function ProjectView({
         >
           <div className="flex items-center justify-between px-2 py-2 border-b border-border/50 shrink-0" style={{ height: 32 }}>
             <span className="text-xs text-muted-foreground/70 font-medium">ASSETS</span>
+            <button
+              className="p-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+              onClick={() => refreshAssets()}
+              title="Reload"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+            </button>
           </div>
           <div className="flex-1 min-h-0 overflow-hidden">
             <AssetsPanel hideHeader />

@@ -6,6 +6,7 @@ import { VideoClipCutterModule } from './modules/video-clip-cutter.js';
 import { LlmAgentModule } from './modules/llm-agent.js';
 import { TtsElevenlabsModule } from './modules/tts-elevenlabs.js';
 import { VideoRenderRemotionModule } from './modules/video-render-remotion.js';
+import { LlmScenarioGeneratorModule } from './modules/llm-scenario-generator.js';
 
 const modules = new Map<string, WorkflowModule>();
 
@@ -20,6 +21,7 @@ register(new VideoClipCutterModule());
 register(new LlmAgentModule());
 register(new TtsElevenlabsModule());
 register(new VideoRenderRemotionModule());
+register(new LlmScenarioGeneratorModule());
 
 export function getModule(type: string): WorkflowModule | undefined {
   return modules.get(type);

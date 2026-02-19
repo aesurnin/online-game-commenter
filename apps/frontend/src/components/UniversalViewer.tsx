@@ -3,6 +3,7 @@ import ReactMarkdown from "react-markdown"
 import { Button } from "@/components/ui/button"
 import { RemotionPreview } from "@/components/remotion/RemotionPreview"
 import type { PreviewAssetState, PreviewAssetMetadata } from "@/contexts/PreviewVideoContext"
+import { useLiveRemotion } from "@/contexts/LiveRemotionContext"
 
 function formatSize(bytes?: number): string {
   if (bytes == null) return "—"
@@ -137,15 +138,47 @@ function getModuleMetadataUrl(outputUrl: string): string | null {
 }
 
 function isTextContentType(contentType: string, url: string): boolean {
-  if (contentType.startsWith("text/") || contentType === "application/json") return true
+  if (
+    contentType.startsWith("text/") ||
+    contentType === "application/json" ||
+    contentType === "application/xml" ||
+    contentType === "application/yaml"
+  )
+    return true
   const u = url.split("?")[0].toLowerCase()
-  return u.endsWith(".txt") || u.endsWith(".md") || u.endsWith(".json")
+  return (
+    u.endsWith(".txt") ||
+    u.endsWith(".md") ||
+    u.endsWith(".json") ||
+    u.endsWith(".xml") ||
+    u.endsWith(".yaml") ||
+    u.endsWith(".yml") ||
+    u.endsWith(".csv") ||
+    u.endsWith(".log")
+  )
 }
 
 function isMarkdownContentType(contentType: string, url: string): boolean {
   if (contentType === "text/markdown") return true
   const u = url.split("?")[0].toLowerCase()
   return u.endsWith(".md")
+}
+
+/** Detect if JSON content matches RemotionScene schema (clips, width/height/fps).
+ * Exclude scenario format (has top-level "slots") — show that as text, not Remotion. */
+function isRemotionSceneJson(text: string): Record<string, unknown> | null {
+  try {
+    const data = JSON.parse(text) as Record<string, unknown>
+    // Scenario generator output has "slots" — treat as text, not Remotion
+    if (Array.isArray(data?.slots)) return null
+    const scene = (data.scene ?? data) as Record<string, unknown>
+    const hasClips = Array.isArray(scene?.clips)
+    const hasDimensions = typeof scene?.width === "number" || typeof scene?.height === "number" || typeof scene?.fps === "number"
+    if (hasClips || hasDimensions) return (scene ?? data) as Record<string, unknown>
+    return null
+  } catch {
+    return null
+  }
 }
 
 function RemotionPreviewWrapper({
@@ -165,18 +198,33 @@ function RemotionPreviewWrapper({
     const url = remotionSceneUrl.startsWith("http") || remotionSceneUrl.startsWith("/")
       ? remotionSceneUrl
       : getFullUrl(remotionSceneUrl)
-    fetch(url, { credentials: "include" })
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        return r.json()
-      })
-      .then((data) => {
-        if (!cancelled) setScene((data?.scene ?? data) as Record<string, unknown>)
-      })
-      .catch((e) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e))
-      })
-    return () => { cancelled = true }
+
+    const fetchData = () => {
+      fetch(url, { credentials: "include" })
+        .then((r) => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`)
+          return r.json()
+        })
+        .then((data) => {
+          if (cancelled) return
+          const sceneData = (data?.scene ?? data) as Record<string, unknown>
+          setScene((prev) => {
+            if (prev && JSON.stringify(prev) === JSON.stringify(sceneData)) return prev
+            return sceneData
+          })
+          setError(null)
+        })
+        .catch((e) => {
+          if (!cancelled) setError(e instanceof Error ? e.message : String(e))
+        })
+    }
+
+    fetchData()
+    const interval = setInterval(fetchData, 3000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
   }, [remotionSceneUrl])
 
   if (error) {
@@ -219,18 +267,29 @@ function TextContentPreview({ url, contentType }: { url: string; contentType: st
     setError(null)
     setText(null)
     const fetchUrl = url.startsWith("http") || url.startsWith("/") ? url : getFullUrl(url)
-    fetch(fetchUrl, { credentials: "include" })
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        return r.text()
-      })
-      .then((body) => {
-        if (!cancelled) setText(body)
-      })
-      .catch((e) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e))
-      })
-    return () => { cancelled = true }
+
+    const fetchData = () => {
+      fetch(fetchUrl, { credentials: "include" })
+        .then((r) => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`)
+          return r.text()
+        })
+        .then((body) => {
+          if (cancelled) return
+          setText((prev) => (prev === body ? prev : body))
+          setError(null)
+        })
+        .catch((e) => {
+          if (!cancelled) setError(e instanceof Error ? e.message : String(e))
+        })
+    }
+
+    fetchData()
+    const interval = setInterval(fetchData, 3000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
   }, [url])
 
   if (error) {
@@ -244,6 +303,14 @@ function TextContentPreview({ url, contentType }: { url: string; contentType: st
     return (
       <div className="p-8 text-center text-muted-foreground text-sm">
         Loading…
+      </div>
+    )
+  }
+  const remotionScene = isRemotionSceneJson(text)
+  if (remotionScene) {
+    return (
+      <div className="flex-1 min-h-0 p-4 overflow-auto">
+        <RemotionPreview scene={remotionScene as Parameters<typeof RemotionPreview>[0]["scene"]} />
       </div>
     )
   }
@@ -268,9 +335,21 @@ function TextContentPreview({ url, contentType }: { url: string; contentType: st
   )
 }
 
+/** Append cache-bust param to force reload when file changes */
+function withCacheBust(url: string, key: string): string {
+  const sep = url.includes("?") ? "&" : "?"
+  return `${url}${sep}_=${key}`
+}
+
 export function UniversalViewer({ asset, onClose }: UniversalViewerProps) {
   const [mediaMetadata, setMediaMetadata] = useState<Partial<PreviewAssetMetadata>>({})
-  const [moduleMetadata, setModuleMetadata] = useState<{ tokenUsage?: PreviewAssetMetadata["tokenUsage"] } | null>(null)
+  const [mediaRefreshKey, setMediaRefreshKey] = useState(0)
+  const [moduleMetadata, setModuleMetadata] = useState<{
+    tokenUsage?: PreviewAssetMetadata["tokenUsage"]
+    costUsd?: number
+    executionTimeMs?: number
+  } | null>(null)
+  const { liveRemotion } = useLiveRemotion()
 
   const contentType = asset?.contentType ?? ""
   const isTextResolved = asset ? isTextContentType(contentType, asset.url) : false
@@ -284,40 +363,84 @@ export function UniversalViewer({ asset, onClose }: UniversalViewerProps) {
     let cancelled = false
     setModuleMetadata(null)
     const fullUrl = metadataUrl.startsWith("http") || metadataUrl.startsWith("/") ? metadataUrl : getFullUrl(metadataUrl)
-    fetch(fullUrl, { credentials: "include" })
-      .then((r) => (r.ok ? r.json() : null))
-      .then(async (data: { tokenUsage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number }; model?: string; costUsd?: number; executionTimeMs?: number } | null) => {
-        if (!data) return
-        const tu = data.tokenUsage
-        const hasTokens = tu && (tu.total_tokens ?? tu.prompt_tokens + tu.completion_tokens) > 0
-        const hasCost = data.costUsd != null && data.costUsd > 0
-        const hasExecutionTime = data.executionTimeMs != null && data.executionTimeMs > 0
-        if (!hasTokens && !hasCost && !hasExecutionTime) return
-        let costUsd: number | undefined = typeof data.costUsd === "number" && data.costUsd > 0 ? data.costUsd : undefined
-        if (costUsd == null && hasTokens && data.model) {
-          try {
-            const params = new URLSearchParams({
-              model: data.model,
-              prompt: String(tu!.prompt_tokens),
-              completion: String(tu!.completion_tokens),
-            })
-            const costRes = await fetch(`/api/workflows/estimate-cost?${params}`, { credentials: "include" })
-            if (costRes.ok) {
-              const { costUsd: c } = await costRes.json()
-              if (typeof c === "number" && c > 0) costUsd = c
-            }
-          } catch { /* ignore */ }
-        }
-        if (cancelled) return
-        setModuleMetadata({
-          tokenUsage: tu ?? undefined,
-          costUsd,
-          executionTimeMs: typeof data.executionTimeMs === 'number' && data.executionTimeMs > 0 ? data.executionTimeMs : undefined,
+
+    const fetchMetadata = () => {
+      fetch(fullUrl, { credentials: "include" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then(async (data: { tokenUsage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number }; model?: string; costUsd?: number; executionTimeMs?: number } | null) => {
+          if (!data || cancelled) return
+          const tu = data.tokenUsage
+          const hasTokens = tu && (tu.total_tokens ?? tu.prompt_tokens + tu.completion_tokens) > 0
+          const hasCost = data.costUsd != null && data.costUsd > 0
+          const hasExecutionTime = data.executionTimeMs != null && data.executionTimeMs > 0
+          if (!hasTokens && !hasCost && !hasExecutionTime) return
+          let costUsd: number | undefined = typeof data.costUsd === "number" && data.costUsd > 0 ? data.costUsd : undefined
+          if (costUsd == null && hasTokens && data.model) {
+            try {
+              const params = new URLSearchParams({
+                model: data.model,
+                prompt: String(tu!.prompt_tokens),
+                completion: String(tu!.completion_tokens),
+              })
+              const costRes = await fetch(`/api/workflows/estimate-cost?${params}`, { credentials: "include" })
+              if (costRes.ok) {
+                const { costUsd: c } = await costRes.json()
+                if (typeof c === "number" && c > 0) costUsd = c
+              }
+            } catch { /* ignore */ }
+          }
+          if (cancelled) return
+          setModuleMetadata({
+            tokenUsage: tu ?? undefined,
+            costUsd,
+            executionTimeMs: typeof data.executionTimeMs === 'number' && data.executionTimeMs > 0 ? data.executionTimeMs : undefined,
+          })
         })
-      })
-      .catch(() => {})
-    return () => { cancelled = true }
+        .catch(() => {})
+    }
+
+    fetchMetadata()
+    const interval = setInterval(fetchMetadata, 3000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
   }, [metadataUrl])
+
+  const isMedia = asset && (
+    contentType.startsWith("video/") ||
+    contentType.startsWith("image/") ||
+    contentType.startsWith("audio/") ||
+    /\.(mp3|wav|ogg|m4a)$/i.test(asset.url.split("?")[0])
+  )
+  const mediaUrl = asset?.url
+
+  useEffect(() => {
+    if (!isMedia || !mediaUrl) return
+    let lastModified: string | null = null
+    let cancelled = false
+
+    const checkAndRefresh = () => {
+      const url = mediaUrl.startsWith("http") || mediaUrl.startsWith("/") ? mediaUrl : getFullUrl(mediaUrl)
+      fetch(url, { method: "HEAD", credentials: "include" })
+        .then((r) => {
+          if (cancelled) return
+          const lm = r.headers.get("last-modified")
+          if (lm && lastModified !== null && lm !== lastModified) {
+            setMediaRefreshKey((k) => k + 1)
+          }
+          lastModified = lm
+        })
+        .catch(() => {})
+    }
+
+    checkAndRefresh()
+    const interval = setInterval(checkAndRefresh, 3000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [isMedia, mediaUrl])
 
   const handleVideoMetadata = useCallback((e: React.SyntheticEvent<HTMLVideoElement>) => {
     const v = e.currentTarget
@@ -359,12 +482,13 @@ export function UniversalViewer({ asset, onClose }: UniversalViewerProps) {
   )
 
   if (asset.inlineRemotionScene) {
+    const scene = (liveRemotion.scene ?? asset.inlineRemotionScene) as Parameters<typeof RemotionPreview>[0]["scene"]
     return (
       <div className="w-full max-w-4xl flex flex-col items-center space-y-3">
         <div className="rounded-lg overflow-hidden shadow-lg border bg-background flex flex-col w-full">
           {header}
         </div>
-        <RemotionPreview scene={asset.inlineRemotionScene as Parameters<typeof RemotionPreview>[0]["scene"]} />
+        <RemotionPreview scene={scene} />
       </div>
     )
   }
@@ -403,7 +527,8 @@ export function UniversalViewer({ asset, onClose }: UniversalViewerProps) {
         <div className="aspect-video flex items-center justify-center bg-black min-h-[200px]">
           {isVideo && (
             <video
-              src={asset.url}
+              key={mediaRefreshKey}
+              src={withCacheBust(asset.url, String(mediaRefreshKey))}
               controls
               className="w-full h-full object-contain max-h-[70vh]"
               onLoadedMetadata={handleVideoMetadata}
@@ -411,7 +536,8 @@ export function UniversalViewer({ asset, onClose }: UniversalViewerProps) {
           )}
           {isImage && (
             <img
-              src={asset.url}
+              key={mediaRefreshKey}
+              src={withCacheBust(asset.url, String(mediaRefreshKey))}
               alt={asset.label ?? "Preview"}
               className="max-w-full max-h-[70vh] object-contain"
               onLoad={handleImageLoad}
@@ -420,7 +546,8 @@ export function UniversalViewer({ asset, onClose }: UniversalViewerProps) {
           {isAudio && (
             <div className="w-full max-w-lg px-4 py-8">
               <audio
-                src={asset.url}
+                key={mediaRefreshKey}
+                src={withCacheBust(asset.url, String(mediaRefreshKey))}
                 controls
                 className="w-full"
                 onLoadedMetadata={handleAudioMetadata}

@@ -25,7 +25,7 @@ export interface WorkflowDefinition {
 export interface ModuleParamSchema {
   key: string;
   label: string;
-  type: 'number' | 'string' | 'boolean' | 'prompt';
+  type: 'number' | 'string' | 'boolean' | 'prompt' | 'json';
   default?: unknown;
   min?: number;
   max?: number;

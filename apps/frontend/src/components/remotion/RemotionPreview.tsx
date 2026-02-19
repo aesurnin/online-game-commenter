@@ -69,6 +69,7 @@ export function RemotionPreview({ scene, className }: RemotionPreviewProps) {
           compositionHeight={compH}
           fps={fps}
           controls
+          numberOfSharedAudioTags={8}
           style={{ width: playerSize.w, height: playerSize.h }}
         />
       )}

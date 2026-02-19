@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react"
-import { File, ChevronDown, ChevronRight, ExternalLink, Loader2, Folder, Trash2 } from "lucide-react"
+import { File, ChevronDown, ChevronRight, Loader2, Folder, Trash2, Eye, SquareArrowOutUpRight, RefreshCw } from "lucide-react"
 import { useSelectedVideo } from "@/contexts/SelectedVideoContext"
 import { usePreviewVideo } from "@/contexts/PreviewVideoContext"
 import { ConfirmDialog } from "@/components/ui/confirm-dialog"
@@ -124,10 +124,18 @@ export function AssetsPanel({ hideHeader }: { hideHeader?: boolean } = {}) {
         onConfirm={handleConfirmDelete}
       />
       {!hideHeader && (
-        <div className="px-3 pt-3 pb-2 border-b shrink-0">
+        <div className="px-3 pt-3 pb-2 border-b shrink-0 flex items-center justify-between gap-2">
           <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
             Assets
           </span>
+          <button
+            className="p-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+            onClick={() => refreshAssets()}
+            disabled={loading}
+            title="Reload"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
+          </button>
         </div>
       )}
       <div className="flex-1 overflow-y-auto p-2">
@@ -195,15 +203,14 @@ export function AssetsPanel({ hideHeader }: { hideHeader?: boolean } = {}) {
   )
 }
 
-const PREVIEWABLE_EXT = /\.(mp4|webm|mov|mkv|jpg|jpeg|png|gif|webp|mp3|wav|ogg|m4a|txt|md)$/i
-
 function getContentTypeFromExt(filename: string): string {
   const ext = filename.toLowerCase().match(/\.[^.]+$/)?.[0] ?? ""
   const map: Record<string, string> = {
     ".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime", ".mkv": "video/x-matroska",
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp",
     ".mp3": "audio/mpeg", ".wav": "audio/wav", ".ogg": "audio/ogg", ".m4a": "audio/mp4",
-    ".txt": "text/plain", ".md": "text/markdown",
+    ".txt": "text/plain", ".md": "text/markdown", ".json": "application/json", ".xml": "application/xml",
+    ".yaml": "text/yaml", ".yml": "text/yaml", ".csv": "text/csv", ".log": "text/plain",
   }
   return map[ext] ?? "application/octet-stream"
 }
@@ -340,7 +347,7 @@ function WorkflowCacheRow({
               {entries.map((entry) => {
                 const relPath = currentPath ? `${currentPath}/${entry.name}` : entry.name
                 const isExpanded = entry.type === "file" && expandedEntryKey === relPath
-                const canPreview = entry.type === "file" && PREVIEWABLE_EXT.test(entry.name)
+                const isFile = entry.type === "file"
                 return (
                   <li key={entry.name}>
                     {entry.type === "dir" ? (
@@ -370,23 +377,35 @@ function WorkflowCacheRow({
                           {entry.size != null && (
                             <span className="text-muted-foreground shrink-0">{formatSize(entry.size)}</span>
                           )}
-                          {canPreview && (
-                            <button
-                              className="shrink-0 p-1 rounded hover:bg-muted opacity-0 group-hover/row:opacity-100 transition-opacity"
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                const url = `/api/projects/${projectId}/videos/${videoId}/workflow-cache/${encodeURIComponent(folder.folderName)}/file?path=${encodeURIComponent(relPath)}`
-                                onPreview({
-                                  url,
-                                  label: `${folder.folderName}/${relPath}`,
-                                  contentType: getContentTypeFromExt(entry.name),
-                                  metadata: { size: entry.size, lastModified: entry.lastModified },
-                                })
-                              }}
-                              title="Preview"
-                            >
-                              <ExternalLink className="h-3 w-3" />
-                            </button>
+                          {isFile && (
+                            <span className="shrink-0 flex items-center gap-0.5 opacity-0 group-hover/row:opacity-100 transition-opacity">
+                              <button
+                                className="p-1 rounded hover:bg-muted"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  const url = `/api/projects/${projectId}/videos/${videoId}/workflow-cache/${encodeURIComponent(folder.folderName)}/file?path=${encodeURIComponent(relPath)}`
+                                  onPreview({
+                                    url,
+                                    label: `${folder.folderName}/${relPath}`,
+                                    contentType: getContentTypeFromExt(entry.name),
+                                    metadata: { size: entry.size, lastModified: entry.lastModified },
+                                  })
+                                }}
+                                title="Preview in main area"
+                              >
+                                <Eye className="h-3 w-3" />
+                              </button>
+                              <a
+                                href={`/api/projects/${projectId}/videos/${videoId}/workflow-cache/${encodeURIComponent(folder.folderName)}/file?path=${encodeURIComponent(relPath)}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="p-1 rounded hover:bg-muted inline-flex"
+                                onClick={(e) => e.stopPropagation()}
+                                title="Open in new tab"
+                              >
+                                <SquareArrowOutUpRight className="h-3 w-3" />
+                              </a>
+                            </span>
                           )}
                         </div>
                         {isExpanded && (
@@ -409,7 +428,7 @@ function WorkflowCacheRow({
                                 {folder.folderName}/{relPath}
                               </code>
                             </div>
-                            {canPreview && (
+                            {isFile && (
                               <div className="mt-2 flex gap-3">
                                 <button
                                   className="text-xs text-primary hover:underline"
@@ -481,16 +500,28 @@ function AssetRow({
           {asset.shortKey}
         </span>
         {asset.previewUrl && (
-          <button
-            className="shrink-0 p-1 rounded hover:bg-muted"
-            onClick={(e) => {
-              e.stopPropagation()
-              onPreview()
-            }}
-            title="Preview"
-          >
-            <ExternalLink className="h-3 w-3" />
-          </button>
+          <span className="shrink-0 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+            <button
+              className="p-1 rounded hover:bg-muted"
+              onClick={(e) => {
+                e.stopPropagation()
+                onPreview()
+              }}
+              title="Preview in main area"
+            >
+              <Eye className="h-3 w-3" />
+            </button>
+            <a
+              href={asset.previewUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="p-1 rounded hover:bg-muted inline-flex"
+              onClick={(e) => e.stopPropagation()}
+              title="Open in new tab"
+            >
+              <SquareArrowOutUpRight className="h-3 w-3" />
+            </a>
+          </span>
         )}
         <button
           className="shrink-0 p-1 rounded hover:bg-destructive/20 hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity"

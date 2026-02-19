@@ -14,7 +14,8 @@ if (!isR2Configured()) {
 }
 
 const server: FastifyInstance = Fastify({
-  logger: true
+  logger: true,
+  disableRequestLogging: true,
 });
 
 server.register(cors, { 

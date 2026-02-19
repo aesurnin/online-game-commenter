@@ -6,7 +6,9 @@ import { and, eq, count } from 'drizzle-orm';
 import z from 'zod';
 import { uploadToR2, deleteFromR2, deletePrefixFromR2, getPresignedUrl, listObjectsWithMetaFromR2, streamObjectFromR2 } from '../lib/r2.js';
 import fs from 'fs';
-import { cleanupWorkflowModuleCache, ensureWorkflowModuleCacheDirs, listWorkflowModuleCache, listWorkflowCacheFolderContents, getWorkflowCacheFilePath, readWorkflowModuleMetadata } from '../lib/workflow/runner.js';
+import { cleanupWorkflowModuleCache, ensureWorkflowModuleCacheDirs, listWorkflowModuleCache, listWorkflowCacheFolderContents, getWorkflowCacheFilePath, readWorkflowModuleMetadata, readWorkflowModuleSlots } from '../lib/workflow/runner.js';
+import { ensurePricingLoaded, calculateCost } from '../lib/workflow/openrouter-pricing.js';
+import { generateScenarioPreview } from '../lib/workflow/modules/llm-scenario-generator.js';
 import { resolveWorkflowVariablesForApi } from '../lib/workflow/variable-resolver.js';
 import { addScreencastJob, removeScreencastJobByVideoId } from '../lib/queue.js';
 import { listJobs } from '../lib/workflow-job-store.js';
@@ -489,17 +491,11 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
     const all = [...list1, ...list2];
     const assets = await Promise.all(
       all.map(async (obj) => {
-        const ct = obj.contentType ?? '';
-        const isVideo = ct.startsWith('video/');
-        const isImage = ct.startsWith('image/');
-        const isText = ct.startsWith('text/') || /\.(txt|md)$/i.test(obj.key);
         let previewUrl: string | undefined;
-        if (isVideo || isImage || isText) {
-          try {
-            previewUrl = await getPresignedUrl(obj.key, 3600);
-          } catch {
-            // skip
-          }
+        try {
+          previewUrl = await getPresignedUrl(obj.key, 3600);
+        } catch {
+          // skip
         }
         const shortKey = obj.key.startsWith(prefix1)
           ? obj.key.slice(prefix1.length)
@@ -609,6 +605,110 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
     return reply.send({ variables: values });
   });
 
+  /** Sync workflow step outputs from backend cache (source of truth). Use after page reload to fix stale cache. */
+  fastify.post<{
+    Params: { id: string; videoId: string };
+    Body: { workflow?: { modules?: Array<{ id: string; type: string; outputs?: Record<string, string> }> } };
+  }>('/:id/videos/:videoId/workflow-cache/state', async (request, reply) => {
+    const { id: projectId, videoId } = request.params;
+    const { workflow } = request.body ?? {};
+    const modules = workflow?.modules ?? [];
+
+    const project = await db.query.projects.findFirst({
+      where: (p, { and, eq }) => and(eq(p.id, projectId), eq(p.ownerId, request.user!.id)),
+    });
+    if (!project) return reply.status(404).send({ error: 'Not found' });
+
+    const [video] = await db.select()
+      .from(videoEntities)
+      .where(and(eq(videoEntities.id, videoId), eq(videoEntities.projectId, projectId)));
+    if (!video) return reply.status(404).send({ error: 'Video not found' });
+
+    const resolved = await resolveWorkflowVariablesForApi(projectId, videoId, { modules });
+    const stepOutputUrls: Record<number, string> = {};
+    const stepOutputContentTypes: Record<number, string> = {};
+    const stepRemotionSceneUrls: Record<number, string> = {};
+    const stepStatuses: Record<number, 'done' | 'pending'> = {};
+    const slotsByModuleId: Record<string, Array<{ key: string; kind: string; label?: string }>> = {};
+
+    for (let i = 0; i < modules.length; i++) {
+      const def = modules[i];
+      if (!def.outputs) continue;
+      const firstVarName = Object.values(def.outputs)[0];
+      if (!firstVarName) continue;
+      const info = resolved[firstVarName];
+      if (!info) continue;
+      const fileUrl = `/api/projects/${projectId}/videos/${videoId}/workflow-cache/${encodeURIComponent(info.folderName)}/file?path=${encodeURIComponent(info.fileName)}`;
+      stepOutputUrls[i] = fileUrl;
+      stepStatuses[i] = 'done';
+      const ext = info.fileName.toLowerCase();
+      stepOutputContentTypes[i] = ext.endsWith('.md') ? 'text/markdown' : ext.endsWith('.json') ? 'application/json' : info.isText ? 'text/plain' : 'video/mp4';
+      if (def.type === 'video.render.remotion') {
+        stepRemotionSceneUrls[i] = `/api/projects/${projectId}/videos/${videoId}/workflow-cache/${encodeURIComponent(info.folderName)}/file?path=${encodeURIComponent('scene.json')}`;
+      }
+      if (def.type === 'llm.scenario.generator' && def.id) {
+        const slotsResult = await readWorkflowModuleSlots(projectId, videoId, def.id);
+        if (slotsResult?.slots?.length) {
+          slotsByModuleId[def.id] = slotsResult.slots;
+        }
+      }
+    }
+
+    return reply.send({ stepOutputUrls, stepOutputContentTypes, stepRemotionSceneUrls, stepStatuses, slotsByModuleId });
+  });
+
+  fastify.post<{
+    Params: { id: string; videoId: string };
+    Body: { prompt: string; params?: Record<string, unknown>; contextText?: string };
+  }>('/:id/videos/:videoId/generate-scenario', async (request, reply) => {
+    const { id: projectId, videoId } = request.params;
+    const body = request.body as { prompt?: string; params?: Record<string, unknown>; contextText?: string } | undefined;
+    const project = await db.query.projects.findFirst({
+      where: (p, { and, eq }) => and(eq(p.id, projectId), eq(p.ownerId, request.user!.id)),
+    });
+    if (!project) return reply.status(404).send({ error: 'Not found' });
+
+    const [video] = await db.select()
+      .from(videoEntities)
+      .where(and(eq(videoEntities.id, videoId), eq(videoEntities.projectId, projectId)));
+    if (!video) return reply.status(404).send({ error: 'Video not found' });
+
+    const prompt = String(body?.prompt ?? '').trim();
+    if (!prompt) return reply.status(400).send({ error: 'prompt is required' });
+
+    const p = body?.params ?? {};
+    const result = await generateScenarioPreview({
+      prompt,
+      contextText: typeof body?.contextText === 'string' ? body.contextText : undefined,
+      apiKeyEnvVar: String(p.apiKeyEnvVar ?? 'OPENROUTER_API_KEY'),
+      model: String(p.model ?? 'google/gemini-2.0-flash-001'),
+      temperature: Number(p.temperature ?? 0.5),
+      maxTokens: Number(p.maxTokens ?? 4096),
+    });
+
+    if (!result.success) return reply.status(400).send({ error: result.error });
+    return reply.send({ json: result.json, slots: result.slots });
+  });
+
+  fastify.get<{
+    Params: { id: string; videoId: string; moduleId: string };
+  }>('/:id/videos/:videoId/workflow-cache/slots/:moduleId', async (request, reply) => {
+    const { id: projectId, videoId, moduleId } = request.params;
+    const project = await db.query.projects.findFirst({
+      where: (p, { and, eq }) => and(eq(p.id, projectId), eq(p.ownerId, request.user!.id)),
+    });
+    if (!project) return reply.status(404).send({ error: 'Not found' });
+
+    const [video] = await db.select()
+      .from(videoEntities)
+      .where(and(eq(videoEntities.id, videoId), eq(videoEntities.projectId, projectId)));
+    if (!video) return reply.status(404).send({ error: 'Video not found' });
+
+    const result = await readWorkflowModuleSlots(projectId, videoId, moduleId);
+    if (!result) return reply.status(404).send({ error: 'Slots not found. Run the scenario generator first.' });
+    return reply.send(result);
+  });
+
   fastify.get('/:id/videos/:videoId/workflow-cache', async (request, reply) => {
     const { id: projectId, videoId } = request.params as { id: string; videoId: string };
     const project = await db.query.projects.findFirst({
@@ -638,15 +738,26 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
     if (!video) return reply.status(404).send({ error: 'Video not found' });
 
     const folders = await listWorkflowModuleCache(projectId, videoId);
-    const byModuleId: Record<string, { executionTimeMs?: number; costUsd?: number; tokenUsage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } }> = {};
+    const byModuleId: Record<string, { executionTimeMs?: number; costUsd?: number; tokenUsage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number }; model?: string }> = {};
     let aggregatedCostUsd = 0;
     let aggregatedExecutionTimeMs = 0;
     const aggregatedTokenUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+    await ensurePricingLoaded();
     for (const { folderName, moduleId } of folders) {
       const meta = await readWorkflowModuleMetadata(projectId, videoId, folderName);
       if (meta) {
-        byModuleId[moduleId] = meta;
-        if (typeof meta.costUsd === 'number' && meta.costUsd > 0) aggregatedCostUsd += meta.costUsd;
+        let costUsd = meta.costUsd;
+        if (costUsd == null && meta.tokenUsage && meta.model) {
+          costUsd = calculateCost(
+            meta.model,
+            meta.tokenUsage.prompt_tokens ?? 0,
+            meta.tokenUsage.completion_tokens ?? 0
+          );
+          if (costUsd > 0) costUsd = Math.round(costUsd * 10000) / 10000;
+        }
+        const entry = { ...meta, costUsd: costUsd ?? meta.costUsd };
+        byModuleId[moduleId] = entry;
+        if (typeof entry.costUsd === 'number' && entry.costUsd > 0) aggregatedCostUsd += entry.costUsd;
         if (typeof meta.executionTimeMs === 'number' && meta.executionTimeMs > 0) aggregatedExecutionTimeMs += meta.executionTimeMs;
         if (meta.tokenUsage) {
           aggregatedTokenUsage.prompt_tokens += meta.tokenUsage.prompt_tokens ?? 0;
@@ -712,10 +823,40 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
 
     try {
       const { absolutePath, contentType } = await getWorkflowCacheFilePath(projectId, videoId, folderName, filePath);
+      const stat = fs.statSync(absolutePath);
+      const fileSize = stat.size;
+      const rangeHeader = request.headers.range;
+
+      if (rangeHeader) {
+        const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
+        if (!match) {
+          return reply.status(416)
+            .header('Content-Range', `bytes */${fileSize}`)
+            .send({ error: 'Invalid Range header' });
+        }
+        const start = parseInt(match[1], 10);
+        const end = match[2] ? parseInt(match[2], 10) : fileSize - 1;
+        if (start >= fileSize || end >= fileSize || start > end) {
+          return reply.status(416)
+            .header('Content-Range', `bytes */${fileSize}`)
+            .send({ error: 'Range not satisfiable' });
+        }
+        const chunkSize = end - start + 1;
+        const stream = fs.createReadStream(absolutePath, { start, end });
+        return reply
+          .status(206)
+          .header('Content-Type', contentType)
+          .header('Content-Range', `bytes ${start}-${end}/${fileSize}`)
+          .header('Accept-Ranges', 'bytes')
+          .header('Content-Length', String(chunkSize))
+          .send(stream);
+      }
+
       const stream = fs.createReadStream(absolutePath);
       return reply
         .header('Content-Type', contentType)
         .header('Accept-Ranges', 'bytes')
+        .header('Content-Length', String(fileSize))
         .send(stream);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

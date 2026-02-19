@@ -12,6 +12,7 @@ import { Providers } from "@/pages/Providers"
 import { LogsProvider, useLogs } from "@/contexts/LogsContext"
 import { SelectedVideoProvider } from "@/contexts/SelectedVideoContext"
 import { PreviewVideoProvider } from "@/contexts/PreviewVideoContext"
+import { LiveRemotionProvider } from "@/contexts/LiveRemotionContext"
 import { AddStepPanelProvider } from "@/contexts/AddStepPanelContext"
 import { ThemeProvider, useTheme } from "@/contexts/ThemeContext"
 import { ActivityBar } from "@/components/ActivityBar"
@@ -408,11 +409,13 @@ function App() {
       <LogsProvider>
         <SelectedVideoProvider>
           <PreviewVideoProvider>
+            <LiveRemotionProvider>
             <WorkflowJobProvider>
               <BrowserRouter>
                 <AppLayout />
               </BrowserRouter>
             </WorkflowJobProvider>
+            </LiveRemotionProvider>
           </PreviewVideoProvider>
         </SelectedVideoProvider>
       </LogsProvider>

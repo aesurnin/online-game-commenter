@@ -221,6 +221,34 @@ const MIME_BY_EXT: Record<string, string> = {
   '.txt': 'text/plain', '.md': 'text/markdown',
 };
 
+/** Read slots.json from a module's cache folder. Returns null if not found or invalid. */
+export async function readWorkflowModuleSlots(
+  projectId: string,
+  videoId: string,
+  moduleId: string
+): Promise<{ slots: Array<{ key: string; kind: string; label?: string }> } | null> {
+  const folders = await listWorkflowModuleCache(projectId, videoId);
+  const match = folders.find((f) => f.moduleId === moduleId);
+  if (!match) return null;
+  try {
+    const { absolutePath } = await getWorkflowCacheFilePath(projectId, videoId, match.folderName, 'slots.json');
+    const raw = await fs.readFile(absolutePath, 'utf8');
+    const data = JSON.parse(raw) as { slots?: unknown[] };
+    if (!Array.isArray(data.slots)) return null;
+    const slots = data.slots
+      .filter((s): s is Record<string, unknown> => s != null && typeof s === 'object')
+      .map((s) => ({
+        key: String(s.key ?? ''),
+        kind: String(s.kind ?? 'video'),
+        label: typeof s.label === 'string' ? s.label : undefined,
+      }))
+      .filter((s) => Boolean(s.key));
+    return { slots };
+  } catch {
+    return null;
+  }
+}
+
 /** Resolve absolute path for a file in workflow cache. filePath is relative to folder (e.g. "output.mp4" or "subdir/file.mp4"). */
 export async function getWorkflowCacheFilePath(
   projectId: string,

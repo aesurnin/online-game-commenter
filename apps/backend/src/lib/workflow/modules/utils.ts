@@ -46,6 +46,33 @@ export async function resolvePromptPlaceholders(
   return result;
 }
 
+/** Recursively replace {{variableName}} placeholders in JSON values with variables map. */
+export function resolveJsonPlaceholders(
+  value: unknown,
+  variables: Record<string, string>,
+): unknown {
+  if (value === null || value === undefined) return value;
+
+  if (typeof value === 'string') {
+    const re = /\{\{([A-Za-z0-9_]+)\}\}/g;
+    return value.replace(re, (_, name) => variables[name] ?? `{{${name}}}`);
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => resolveJsonPlaceholders(item, variables));
+  }
+
+  if (typeof value === 'object') {
+    const result: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) {
+      result[k] = resolveJsonPlaceholders(v, variables);
+    }
+    return result;
+  }
+
+  return value;
+}
+
 // ---------------------------------------------------------------------------
 // FFmpeg helpers
 // ---------------------------------------------------------------------------

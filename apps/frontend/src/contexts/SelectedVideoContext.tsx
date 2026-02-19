@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useCallback, type ReactNode } from "react"
+import { createContext, useContext, useState, useCallback, type ReactNode, type Dispatch, type SetStateAction } from "react"
 
 type SelectedVideo = {
   projectId: string
@@ -8,11 +8,13 @@ type SelectedVideo = {
   playUrl?: string | null
   /** Streaming URL (Range support, prefer for video src) */
   streamUrl?: string | null
+  /** Video metadata, e.g. providerId for provider-specific crop */
+  metadata?: { providerId?: string | null }
 } | null
 
 const SelectedVideoContext = createContext<{
   selectedVideo: SelectedVideo
-  setSelectedVideo: (v: SelectedVideo) => void
+  setSelectedVideo: Dispatch<SetStateAction<SelectedVideo>>
   assetsRefreshTrigger: number
   refreshAssets: () => void
 } | null>(null)

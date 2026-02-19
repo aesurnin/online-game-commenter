@@ -310,6 +310,29 @@ export function WorkflowEditor() {
     })
   }, [projectId, videoId])
 
+  /** R2 is single source of truth for saved workflows. When we have currentWorkflowId, fetch from R2
+   * so edits made elsewhere propagate everywhere. Fallback to cached workflow only if R2 returns 404 (new/unsaved). */
+  useEffect(() => {
+    if (!videoId || !currentWorkflowId) return
+    let cancelled = false
+    fetch(`/api/workflows/${currentWorkflowId}`, { credentials: "include" })
+      .then((r) => {
+        if (cancelled) return null
+        if (r.ok) return r.json()
+        if (r.status === 404) return undefined
+        return null
+      })
+      .then((def: WorkflowDefinition | undefined | null) => {
+        if (cancelled) return
+        if (def) {
+          updateVideoState(videoId, { workflow: def })
+        }
+        // If 404, keep current workflow (new/unsaved). If error, keep as is.
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [videoId, currentWorkflowId, updateVideoState])
+
   /** Sync from backend cache (source of truth) after load. Fixes stale cache when user reloaded mid-job. */
   useEffect(() => {
     if (!projectId || !videoId || !workflow?.modules?.length) return
@@ -569,6 +592,14 @@ export function WorkflowEditor() {
         if (r.ok) {
           const def = await r.json()
           updateVideoState(videoId, { workflow: def, currentWorkflowId: id, stepStatuses: {} })
+          if (projectId) {
+            fetch(`/api/projects/${projectId}`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              credentials: "include",
+              body: JSON.stringify({ workflowId: id }),
+            }).catch(() => {})
+          }
         } else {
           addLog(`Workflow not found: ${id}`, "error")
         }
@@ -576,8 +607,22 @@ export function WorkflowEditor() {
         addLog(`Failed to load workflow: ${e}`, "error")
       }
     },
-    [addLog, videoId, updateVideoState]
+    [addLog, videoId, projectId, updateVideoState]
   )
+
+  /** When new video has no workflow and project has default workflowId, auto-load it. */
+  useEffect(() => {
+    if (!projectId || !videoId || currentWorkflowId) return
+    let cancelled = false
+    fetch(`/api/projects/${projectId}`, { credentials: "include" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((p: { workflowId?: string } | null) => {
+        if (cancelled || !p?.workflowId) return
+        loadWorkflow(p.workflowId)
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [projectId, videoId, currentWorkflowId, loadWorkflow])
 
   /** Restore active job on page reload when backend has a running job for this video */
   useEffect(() => {
@@ -1098,9 +1143,25 @@ export function WorkflowEditor() {
     setCropModalOpen(true)
   }
 
-  const handleSaveCrop = (crop: { left: number; top: number; right: number; bottom: number }) => {
+  const handleSaveCrop = async (crop: { left: number; top: number; right: number; bottom: number }) => {
     if (cropModuleIndex === null) return
-    updateModuleParams(cropModuleIndex, { ...workflow!.modules[cropModuleIndex].params, ...crop })
+    const providerId = selectedVideo?.metadata?.providerId
+    if (providerId) {
+      const r = await fetch(`/api/providers/${providerId}/crop`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(crop),
+      })
+      if (r.ok) {
+        addLog(`Provider crop saved (global preset for this provider)`, "info")
+        updateModuleParams(cropModuleIndex, { ...workflow!.modules[cropModuleIndex].params, ...crop })
+      } else {
+        addLog(`Failed to save provider crop: ${r.status}`, "error")
+      }
+    } else {
+      updateModuleParams(cropModuleIndex, { ...workflow!.modules[cropModuleIndex].params, ...crop })
+    }
   }
 
   const handleTestCrop = async (crop: { left: number; top: number; right: number; bottom: number; time: number }) => {
@@ -1407,6 +1468,7 @@ export function WorkflowEditor() {
           onClose={() => setCropModalOpen(false)}
           onSave={handleSaveCrop}
           videoUrl={selectedVideo!.streamUrl ?? selectedVideo!.playUrl!}
+          providerId={selectedVideo?.metadata?.providerId ?? null}
           initialCrop={(() => {
             const p = workflow.modules[cropModuleIndex].params ?? {};
             return {

@@ -391,7 +391,14 @@ async function waitForReplayEnd(
 
         if (endSelectors?.length) {
           try {
-            const found = await page.evaluate((s: string[]) => s.some((sel) => !!document.querySelector(sel)), endSelectors) as boolean;
+            const frames = page.frames ? page.frames() : [page];
+            let found = false;
+            for (const frame of frames) {
+              try {
+                found = await frame.evaluate((s: string[]) => s.some((sel) => !!document.querySelector(sel)), endSelectors) as boolean;
+                if (found) break;
+              } catch { /* cross-origin or frame gone */ }
+            }
             if (found) { 
               const reason = `endSelector matched (${endSelectors.join(', ')})`;
               log(`[AutoStop] Reason: ${reason}`);
@@ -404,11 +411,42 @@ async function waitForReplayEnd(
           } catch { /* page gone */ }
         }
 
+        // Rowzones: check for "Replay Summary" text in all frames (game is often in iframe)
+        if (jobData.url.includes('rowzones.com')) {
+          try {
+            const frames = page.frames ? page.frames() : [page];
+            let hasReplaySummary = false;
+            for (const frame of frames) {
+              try {
+                hasReplaySummary = await frame.evaluate(() => {
+                  const text = (document.body?.textContent || '').toLowerCase();
+                  return (
+                    text.includes('replay summary') ||
+                    text.includes('copy the replay url') ||
+                    text.includes('would you like to copy')
+                  );
+                }) as boolean;
+                if (hasReplaySummary) break;
+              } catch { /* cross-origin or frame gone */ }
+            }
+            if (hasReplaySummary) {
+              const reason = 'Rowzones Replay Summary modal appeared';
+              log(`[AutoStop] Reason: ${reason}`);
+              await db.update(videoEntities)
+                .set({ metadata: { ...((v?.metadata as any) || {}), stopReason: reason } })
+                .where(eq(videoEntities.id, videoId));
+              resolve('done');
+              return;
+            }
+          } catch { /* page gone */ }
+        }
+
         if (consoleEndPatterns?.length && recentConsole.length > 0) {
-          const last = recentConsole[recentConsole.length - 1];
-          const matched = consoleEndPatterns.find((p) => last.includes(p));
+          const matched = consoleEndPatterns.find((p) =>
+            recentConsole.some((msg) => msg.includes(p))
+          );
           if (matched) {
-            const reason = `Console pattern matched ("${matched}" in "${last}")`;
+            const reason = `Console pattern matched ("${matched}")`;
             log(`[AutoStop] Reason: ${reason}`);
             await db.update(videoEntities)
               .set({ metadata: { ...((v?.metadata as any) || {}), stopReason: reason } })
@@ -598,9 +636,16 @@ async function runScreencastJob(jobData: ScreencastJobData): Promise<void> {
     });
 
     stream.pipe(ffmpegProcess.stdin);
-    
-    await clickPlayButton(page, videoId, playSelectors, vw, vh, log);
-    await new Promise((r) => setTimeout(r, 1000));
+
+    const isRowzones = jobData.url.includes('rowzones.com');
+    if (!jobData.skipPlayClick && !isRowzones) {
+      await clickPlayButton(page, videoId, playSelectors, vw, vh, log);
+      await new Promise((r) => setTimeout(r, 1000));
+    } else if (isRowzones) {
+      log('[Play] Rowzones: animation starts immediately, skipping play click');
+    } else {
+      log('[Play] skipPlayClick=true, skipping play button');
+    }
     log('Recording...');
     const result = await waitForReplayEnd(page, videoId, jobData, log);
     log(`Stopped: ${result}`);

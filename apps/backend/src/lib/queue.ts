@@ -39,6 +39,8 @@ export type ScreencastJobData = {
   durationLimit?: number;
   endSelectors?: string[];
   playSelectors?: string[];
+  /** When true, skip play button click (e.g. Rowzones where animation starts immediately). */
+  skipPlayClick?: boolean;
   /** Provider-specific: selector for element whose value we monitor (e.g. Total Win). If unchanged for idleSeconds, stop. */
   idleValueSelector?: string;
   /** Seconds of no change in idleValueSelector before auto-stop. Default 40. */

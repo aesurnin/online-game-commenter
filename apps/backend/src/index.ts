@@ -84,17 +84,33 @@ server.get('/config', async (request, reply) => {
 
 async function seedProviderTemplates() {
   const existing = await db.select().from(providerTemplates);
-  if (existing.length > 0) return;
-  await db.insert(providerTemplates).values({
-    name: 'BGaming',
-    urlPattern: 'bgaming-network.com',
-    playSelectors: ['#playBtn', 'button#playBtn', '[class*="replay"]'],
-    endSelectors: [],
-    idleValueSelector: '[class*="total-win"], [class*="totalWin"], [class*="win-total"], [class*="winTotal"], [class*="total_win"]',
-    idleSeconds: 40,
-    consoleEndPatterns: [],
-  });
-  console.log('[Seed] Added BGaming provider template');
+  const hasBGaming = existing.some((t) => t.urlPattern.toLowerCase().includes('bgaming'));
+  const hasRowzones = existing.some((t) => t.urlPattern.toLowerCase().includes('rowzones'));
+
+  if (!hasBGaming) {
+    await db.insert(providerTemplates).values({
+      name: 'BGaming',
+      urlPattern: 'bgaming-network.com',
+      playSelectors: ['#playBtn', 'button#playBtn', '[class*="replay"]'],
+      endSelectors: [],
+      idleValueSelector: '[class*="total-win"], [class*="totalWin"], [class*="win-total"], [class*="winTotal"], [class*="total_win"]',
+      idleSeconds: 40,
+      consoleEndPatterns: [],
+    });
+    console.log('[Seed] Added BGaming provider template');
+  }
+  if (!hasRowzones) {
+    await db.insert(providerTemplates).values({
+      name: 'Rowzones',
+      urlPattern: 'rowzones.com',
+      playSelectors: [], // Animation starts immediately, no play button
+      endSelectors: ['[class*="replay-summary"]', '[class*="ReplaySummary"]', '[class*="summary"]'],
+      idleValueSelector: undefined,
+      idleSeconds: 40,
+      consoleEndPatterns: ['shell:modal:active'], // Console log when demo ends and modal appears
+    });
+    console.log('[Seed] Added Rowzones provider template');
+  }
 }
 
 const start = async () => {

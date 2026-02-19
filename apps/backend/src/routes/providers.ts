@@ -1,6 +1,6 @@
 import { FastifyPluginAsync } from 'fastify';
 import { db } from '../db/index.js';
-import { providerTemplates } from '../db/schema/index.js';
+import { providerCropPresets, providerTemplates } from '../db/schema/index.js';
 import { asc, eq } from 'drizzle-orm';
 import z from 'zod';
 
@@ -115,6 +115,67 @@ const providersRoutes: FastifyPluginAsync = async (fastify) => {
     const [deleted] = await db.delete(providerTemplates).where(eq(providerTemplates.id, id)).returning();
     if (!deleted) return reply.status(404).send({ error: 'Not found' });
     return reply.send({ success: true });
+  });
+
+  /** Get crop preset for a provider (global, per-provider). Returns null if not set. */
+  fastify.get<{ Params: { id: string } }>('/:id/crop', async (request, reply) => {
+    const { id } = request.params;
+    const [preset] = await db.select()
+      .from(providerCropPresets)
+      .where(eq(providerCropPresets.providerId, id));
+    if (!preset) {
+      return reply.send({ left: 0, top: 0, right: 0, bottom: 0 });
+    }
+    return reply.send({
+      left: preset.left,
+      top: preset.top,
+      right: preset.right,
+      bottom: preset.bottom,
+    });
+  });
+
+  /** Save crop preset for a provider (global, per-provider). */
+  fastify.put<{
+    Params: { id: string };
+    Body: { left: number; top: number; right: number; bottom: number };
+  }>('/:id/crop', async (request, reply) => {
+    const { id } = request.params;
+    const schema = z.object({
+      left: z.number().min(0).max(100),
+      top: z.number().min(0).max(100),
+      right: z.number().min(0).max(100),
+      bottom: z.number().min(0).max(100),
+    });
+    const body = schema.safeParse(request.body);
+    if (!body.success) {
+      return reply.status(400).send({ error: body.error.message });
+    }
+    const provider = await db.query.providerTemplates.findFirst({
+      where: eq(providerTemplates.id, id),
+    });
+    if (!provider) return reply.status(404).send({ error: 'Provider not found' });
+
+    const [preset] = await db.insert(providerCropPresets)
+      .values({
+        providerId: id,
+        left: body.data.left,
+        top: body.data.top,
+        right: body.data.right,
+        bottom: body.data.bottom,
+        updatedAt: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: providerCropPresets.providerId,
+        set: {
+          left: body.data.left,
+          top: body.data.top,
+          right: body.data.right,
+          bottom: body.data.bottom,
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
+    return reply.send(preset);
   });
 };
 

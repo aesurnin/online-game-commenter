@@ -215,7 +215,7 @@ function getContentTypeFromExt(filename: string): string {
   return map[ext] ?? "application/octet-stream"
 }
 
-type CacheEntry = { name: string; type: "file" | "dir"; size?: number; lastModified?: string }
+type CacheEntry = { name: string; type: "file" | "dir"; size?: number; lastModified?: string; r2Url?: string }
 
 function WorkflowCacheRow({
   folder,
@@ -383,7 +383,7 @@ function WorkflowCacheRow({
                                 className="p-1 rounded hover:bg-muted"
                                 onClick={(e) => {
                                   e.stopPropagation()
-                                  const url = `/api/projects/${projectId}/videos/${videoId}/workflow-cache/${encodeURIComponent(folder.folderName)}/file?path=${encodeURIComponent(relPath)}`
+                                  const url = entry.r2Url ?? `/api/projects/${projectId}/videos/${videoId}/workflow-cache/${encodeURIComponent(folder.folderName)}/file?path=${encodeURIComponent(relPath)}`
                                   onPreview({
                                     url,
                                     label: `${folder.folderName}/${relPath}`,
@@ -396,7 +396,7 @@ function WorkflowCacheRow({
                                 <Eye className="h-3 w-3" />
                               </button>
                               <a
-                                href={`/api/projects/${projectId}/videos/${videoId}/workflow-cache/${encodeURIComponent(folder.folderName)}/file?path=${encodeURIComponent(relPath)}`}
+                                href={entry.r2Url ?? `/api/projects/${projectId}/videos/${videoId}/workflow-cache/${encodeURIComponent(folder.folderName)}/file?path=${encodeURIComponent(relPath)}`}
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 className="p-1 rounded hover:bg-muted inline-flex"
@@ -446,7 +446,7 @@ function WorkflowCacheRow({
                                   Preview in main area
                                 </button>
                                 <a
-                                  href={`/api/projects/${projectId}/videos/${videoId}/workflow-cache/${encodeURIComponent(folder.folderName)}/file?path=${encodeURIComponent(relPath)}`}
+                                  href={entry.r2Url ?? `/api/projects/${projectId}/videos/${videoId}/workflow-cache/${encodeURIComponent(folder.folderName)}/file?path=${encodeURIComponent(relPath)}`}
                                   target="_blank"
                                   rel="noopener noreferrer"
                                   className="text-xs text-primary hover:underline"

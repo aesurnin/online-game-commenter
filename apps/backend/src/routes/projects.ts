@@ -6,7 +6,7 @@ import { and, eq, count } from 'drizzle-orm';
 import z from 'zod';
 import { uploadToR2, deleteFromR2, deletePrefixFromR2, getPresignedUrl, listObjectsWithMetaFromR2, streamObjectFromR2 } from '../lib/r2.js';
 import fs from 'fs';
-import { cleanupWorkflowModuleCache, ensureWorkflowModuleCacheDirs, listWorkflowModuleCache, listWorkflowCacheFolderContents, getWorkflowCacheFilePath, readWorkflowModuleMetadata, readWorkflowModuleSlots } from '../lib/workflow/runner.js';
+import { cleanupWorkflowModuleCache, ensureWorkflowModuleCacheDirs, listWorkflowModuleCache, listWorkflowCacheFolderContents, getWorkflowCacheFilePath, getWorkflowCacheFolderR2Url, readWorkflowModuleMetadata, readWorkflowModuleSlots } from '../lib/workflow/runner.js';
 import { ensurePricingLoaded, calculateCost } from '../lib/workflow/openrouter-pricing.js';
 import { generateScenarioPreview } from '../lib/workflow/modules/llm-scenario-generator.js';
 import { resolveWorkflowVariablesForApi } from '../lib/workflow/variable-resolver.js';
@@ -208,17 +208,19 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
     const body = schema.safeParse(request.body);
     if (!body.success) return reply.status(400).send({ error: 'Invalid URL' });
 
+    const provider = await resolveProviderForUrl(body.data.url);
     const [video] = await db.insert(videoEntities).values({
       projectId: id,
       status: 'processing',
       sourceUrl: body.data.url,
+      metadata: provider ? { providerId: provider.id } : {},
     }).returning();
 
     const durationLimit = parseInt(process.env.SCREENCAST_MAX_DURATION || '600', 10);
-    const provider = await resolveProviderForUrl(body.data.url);
 
     let endSelectors: string[] | undefined;
     let playSelectors: string[] | undefined;
+    let skipPlayClick: boolean | undefined;
     let idleValueSelector: string | undefined;
     let idleSeconds: number | undefined;
     let consoleEndPatterns: string[] | undefined;
@@ -229,6 +231,7 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
       idleValueSelector = provider.idleValueSelector ?? undefined;
       idleSeconds = provider.idleSeconds ?? 40;
       consoleEndPatterns = (provider.consoleEndPatterns as string[])?.length ? (provider.consoleEndPatterns as string[]) : undefined;
+      skipPlayClick = (provider as { skipPlayClick?: boolean }).skipPlayClick;
     }
 
     if (!playSelectors?.length) {
@@ -263,6 +266,12 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
       if (!idleValueSelector) idleValueSelector = '[class*="total-win"], [class*="totalWin"], [class*="win-total"], [class*="winTotal"], [class*="total_win"]';
       if (idleSeconds == null) idleSeconds = 40;
     }
+    if (body.data.url.includes('rowzones.com')) {
+      if (!playSelectors?.length) playSelectors = []; // Animation starts immediately
+      if (!endSelectors?.length) endSelectors = ['[class*="replay-summary"]', '[class*="ReplaySummary"]', '[class*="summary"]'];
+      if (!consoleEndPatterns?.length) consoleEndPatterns = ['shell:modal:active'];
+      skipPlayClick = true;
+    }
 
     await addScreencastJob({
       projectId: id,
@@ -271,6 +280,7 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
       durationLimit,
       endSelectors,
       playSelectors,
+      skipPlayClick,
       idleValueSelector,
       idleSeconds,
       consoleEndPatterns,
@@ -344,6 +354,7 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
 
     let endSelectors: string[] | undefined;
     let playSelectors: string[] | undefined;
+    let skipPlayClick: boolean | undefined;
     let idleValueSelector: string | undefined;
     let idleSeconds: number | undefined;
     let consoleEndPatterns: string[] | undefined;
@@ -354,6 +365,7 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
       idleValueSelector = provider.idleValueSelector ?? undefined;
       idleSeconds = provider.idleSeconds ?? 40;
       consoleEndPatterns = (provider.consoleEndPatterns as string[])?.length ? (provider.consoleEndPatterns as string[]) : undefined;
+      skipPlayClick = (provider as { skipPlayClick?: boolean }).skipPlayClick;
     }
     if (!playSelectors?.length) {
       try {
@@ -386,6 +398,12 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
       if (!idleValueSelector) idleValueSelector = '[class*="total-win"], [class*="totalWin"], [class*="win-total"], [class*="winTotal"], [class*="total_win"]';
       if (idleSeconds == null) idleSeconds = 40;
     }
+    if (url.includes('rowzones.com')) {
+      if (!playSelectors?.length) playSelectors = []; // Animation starts immediately
+      if (!endSelectors?.length) endSelectors = ['[class*="replay-summary"]', '[class*="ReplaySummary"]', '[class*="summary"]'];
+      if (!consoleEndPatterns?.length) consoleEndPatterns = ['shell:modal:active'];
+      skipPlayClick = true;
+    }
 
     await db.update(videoEntities)
       .set({ status: 'processing', metadata: {} })
@@ -398,6 +416,7 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
       durationLimit,
       endSelectors,
       playSelectors,
+      skipPlayClick,
       idleValueSelector,
       idleSeconds,
       consoleEndPatterns,
@@ -441,12 +460,22 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
       .where(and(eq(videoEntities.id, videoId), eq(videoEntities.projectId, id)));
     if (!video) return reply.status(404).send({ error: 'Video not found' });
 
-    const schema = z.object({ displayName: z.string().optional() });
+    const schema = z.object({
+      displayName: z.string().optional(),
+      metadata: z.object({ providerId: z.string().uuid().nullable().optional() }).optional(),
+    });
     const body = schema.safeParse(request.body);
     if (!body.success) return reply.status(400).send(body.error);
 
     const updates: Record<string, unknown> = {};
     if (body.data.displayName !== undefined) updates.displayName = body.data.displayName;
+    if (body.data.metadata !== undefined) {
+      const meta = (video.metadata as Record<string, unknown>) ?? {};
+      if (body.data.metadata.providerId !== undefined) {
+        meta.providerId = body.data.metadata.providerId;
+      }
+      updates.metadata = meta;
+    }
     if (Object.keys(updates).length === 0) return reply.send(video);
 
     const [updated] = await db.update(videoEntities)
@@ -791,7 +820,18 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
     if (!video) return reply.status(404).send({ error: 'Video not found' });
 
     try {
-      const entries = await listWorkflowCacheFolderContents(projectId, videoId, folderName, subPath);
+      let entries = await listWorkflowCacheFolderContents(projectId, videoId, folderName, subPath);
+      if (!subPath) {
+        const r2Url = await getWorkflowCacheFolderR2Url(projectId, videoId, folderName);
+        if (r2Url) {
+          entries = entries.map((e) => {
+            if (e.type === 'file' && e.name === 'output.mp4') {
+              return { ...e, r2Url };
+            }
+            return e;
+          });
+        }
+      }
       return reply.send({ entries });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -920,11 +960,17 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
 
   fastify.patch('/:id', async (request, reply) => {
     const { id } = request.params as { id: string };
-    const schema = z.object({ name: z.string().min(1) });
+    const schema = z.object({
+      name: z.string().min(1).optional(),
+      workflowId: z.string().nullable().optional(),
+    });
     const body = schema.safeParse(request.body);
     if (!body.success) return reply.status(400).send(body.error);
+    const updates: { name?: string; workflowId?: string | null; updatedAt: Date } = { updatedAt: new Date() };
+    if (body.data.name !== undefined) updates.name = body.data.name;
+    if (body.data.workflowId !== undefined) updates.workflowId = body.data.workflowId;
     const [updated] = await db.update(projects)
-      .set({ name: body.data.name, updatedAt: new Date() })
+      .set(updates)
       .where(eq(projects.id, id))
       .returning();
     if (!updated || updated.ownerId !== request.user!.id) {

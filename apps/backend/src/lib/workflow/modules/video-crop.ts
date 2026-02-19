@@ -1,6 +1,9 @@
 import { spawn } from 'child_process';
 import fs from 'fs/promises';
 import path from 'path';
+import { and, eq } from 'drizzle-orm';
+import { db } from '../../../db/index.js';
+import { providerCropPresets, videoEntities } from '../../../db/schema/index.js';
 import type { WorkflowContext, WorkflowModule, ModuleRunResult } from '../types.js';
 
 async function getVideoDimensions(inputPath: string, signal?: AbortSignal): Promise<{ width: number; height: number }> {
@@ -67,7 +70,27 @@ export class VideoCropModule implements WorkflowModule {
   readonly meta = videoCropMeta;
 
   async run(context: WorkflowContext, params: Record<string, unknown>): Promise<ModuleRunResult> {
-    const { left: leftPct, top: topPct, width: widthPct, height: heightPct } = paramsToLtwh(params);
+    // Resolve crop: prefer global provider preset over workflow params
+    let effectiveParams = params;
+    const [video] = await db.select()
+      .from(videoEntities)
+      .where(and(eq(videoEntities.id, context.videoId), eq(videoEntities.projectId, context.projectId)));
+    const providerId = (video?.metadata as { providerId?: string } | null)?.providerId;
+    if (providerId) {
+      const [preset] = await db.select()
+        .from(providerCropPresets)
+        .where(eq(providerCropPresets.providerId, providerId));
+      if (preset) {
+        effectiveParams = {
+          left: preset.left,
+          top: preset.top,
+          right: preset.right,
+          bottom: preset.bottom,
+        };
+        context.onLog?.(`Using provider crop preset (provider ${providerId.slice(0, 8)}...)`);
+      }
+    }
+    const { left: leftPct, top: topPct, width: widthPct, height: heightPct } = paramsToLtwh(effectiveParams);
 
     const { onProgress, onLog } = context;
     const inputPath = context.currentVideoPath;

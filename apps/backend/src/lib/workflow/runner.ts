@@ -3,7 +3,7 @@ import path from 'path';
 import os from 'os';
 import type { WorkflowDefinition, WorkflowContext, WorkflowModuleDef } from './types.js';
 import { getModule } from './registry.js';
-import { getObjectFromR2 } from '../r2.js';
+import { getObjectFromR2, getPresignedUrl } from '../r2.js';
 import { resolveWorkflowVariables } from './variable-resolver.js';
 import { ensurePricingLoaded, calculateCost } from './openrouter-pricing.js';
 
@@ -244,6 +244,24 @@ export async function readWorkflowModuleSlots(
       }))
       .filter((s) => Boolean(s.key));
     return { slots };
+  } catch {
+    return null;
+  }
+}
+
+/** If folder has r2-uploaded-key.txt (written by worker after R2 upload), return presigned URL. */
+export async function getWorkflowCacheFolderR2Url(
+  projectId: string,
+  videoId: string,
+  folderName: string
+): Promise<string | null> {
+  if (folderName.includes('/') || folderName.includes('..') || folderName.startsWith('.')) return null;
+  const cacheBase = getWorkflowCacheBase();
+  const keyPath = path.join(cacheBase, projectId, videoId, folderName, 'r2-uploaded-key.txt');
+  try {
+    const key = (await fs.readFile(keyPath, 'utf8')).trim();
+    if (!key) return null;
+    return await getPresignedUrl(key, 3600);
   } catch {
     return null;
   }

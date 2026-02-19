@@ -23,6 +23,8 @@ export const projects = pgTable('project', {
   id: uuid('id').defaultRandom().primaryKey(),
   name: text('name').notNull(),
   ownerId: text('owner_id').references(() => users.id).notNull(),
+  /** Default workflow ID for new videos in this project. Loaded from R2 when assigned. */
+  workflowId: text('workflow_id'),
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow(),
 });
@@ -48,6 +50,16 @@ export const providerTemplates = pgTable('provider_template', {
   idleSeconds: integer('idle_seconds').default(40),
   consoleEndPatterns: jsonb('console_end_patterns').$type<string[]>().default([]),
   createdAt: timestamp('created_at').defaultNow(),
+  updatedAt: timestamp('updated_at').defaultNow(),
+});
+
+/** Global crop presets per provider. One row per provider. Used by video.crop module. */
+export const providerCropPresets = pgTable('provider_crop_preset', {
+  providerId: uuid('provider_id').references(() => providerTemplates.id, { onDelete: 'cascade' }).primaryKey(),
+  left: integer('left').notNull().default(0),
+  top: integer('top').notNull().default(0),
+  right: integer('right').notNull().default(0),
+  bottom: integer('bottom').notNull().default(0),
   updatedAt: timestamp('updated_at').defaultNow(),
 });
 

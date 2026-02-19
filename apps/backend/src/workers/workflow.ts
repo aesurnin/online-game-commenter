@@ -105,10 +105,16 @@ async function processWorkflowJob(job: Job<WorkflowJobData>) {
         const outputUrl = await getPresignedUrl(key, 3600);
         const jobUpdates: { outputUrl: string; remotionSceneUrl?: string } = { outputUrl };
 
+        const cacheDir = path.dirname(result.context.currentVideoPath);
+        try {
+          await fs.writeFile(path.join(cacheDir, 'r2-uploaded-key.txt'), key, 'utf8');
+        } catch {
+          /* non-fatal: listing will fall back to workflow-cache URL */
+        }
+
         const idx = stepIndex ?? (workflow.modules?.length ?? 1) - 1;
         const lastMod = workflow.modules?.[idx];
         if (lastMod?.type === 'video.render.remotion') {
-          const cacheDir = path.dirname(result.context.currentVideoPath);
           const folderName = path.basename(cacheDir);
           const remotionSceneUrl = `/api/projects/${projectId}/videos/${videoId}/workflow-cache/${encodeURIComponent(folderName)}/file?path=${encodeURIComponent('scene.json')}`;
           jobUpdates.remotionSceneUrl = remotionSceneUrl;

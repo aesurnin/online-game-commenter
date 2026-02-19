@@ -24,7 +24,7 @@ type VideoEntity = {
   playUrl?: string
   /** Streaming URL (Range support, no full download) */
   streamUrl?: string
-  metadata?: { error?: string; stopReason?: string }
+  metadata?: { error?: string; stopReason?: string; providerId?: string | null }
   createdAt?: string
 }
 
@@ -64,6 +64,8 @@ export function ProjectView({
   const [videoToDelete, setVideoToDelete] = useState<VideoEntity | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [activeWorkflowVideoIds, setActiveWorkflowVideoIds] = useState<Set<string>>(new Set())
+  const [providers, setProviders] = useState<{ id: string; name: string }[]>([])
+  const [updatingProvider, setUpdatingProvider] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const navigate = useNavigate()
 
@@ -109,6 +111,13 @@ export function ProjectView({
     return r.json()
   }
 
+  useEffect(() => {
+    fetch("/api/providers", { credentials: "include" })
+      .then((r) => (r.ok ? r.json() : []))
+      .then((list) => setProviders(list))
+      .catch(() => {})
+  }, [])
+
   async function fetchVideos() {
     if (!id) return []
     const r = await fetch(`/api/projects/${id}/videos?_=${Date.now()}`, {
@@ -126,6 +135,11 @@ export function ProjectView({
         if (!prev) return null
         const found = vids.find((v) => v.id === prev.id)
         return found ?? prev
+      })
+      setGlobalSelectedVideo((prev) => {
+        if (!prev) return prev
+        const found = vids.find((v) => v.id === prev.videoId)
+        return found ? { ...prev, metadata: found.metadata } : prev
       })
     })
   }
@@ -322,7 +336,7 @@ export function ProjectView({
           setVideos((prev) => [...prev, v])
           setSelectedVideo(v)
           setShowAddForm(false)
-          if (id) setGlobalSelectedVideo({ projectId: id, videoId: v.id, sourceUrl: v.sourceUrl, playUrl: v.playUrl, streamUrl: v.streamUrl })
+          if (id) setGlobalSelectedVideo({ projectId: id, videoId: v.id, sourceUrl: v.sourceUrl, playUrl: v.playUrl, streamUrl: v.streamUrl, metadata: v.metadata })
           addLog(`Video uploaded: ${v.id.slice(0, 8)}...`, "info", v.id)
         } catch {
           addLog("Failed to parse upload response", "error")
@@ -361,7 +375,7 @@ export function ProjectView({
         setShowAddForm(false)
         setUrlInput("")
         setProviderMeta(null)
-        if (id) setGlobalSelectedVideo({ projectId: id, videoId: v.id, sourceUrl: v.sourceUrl, playUrl: v.playUrl, streamUrl: v.streamUrl })
+        if (id) setGlobalSelectedVideo({ projectId: id, videoId: v.id, sourceUrl: v.sourceUrl, playUrl: v.playUrl, streamUrl: v.streamUrl, metadata: v.metadata })
         addLog(`Video added by URL: ${v.id.slice(0, 8)}...`, "info", v.id)
       } else {
         const err = await r.json().catch(() => ({}))
@@ -506,6 +520,7 @@ export function ProjectView({
         sourceUrl: video.sourceUrl,
         playUrl: video.playUrl,
         streamUrl: video.streamUrl,
+        metadata: video.metadata,
       })
     }
     addLog(`Selected video ${video.id.slice(0, 8)}`, "info", video.id)
@@ -540,6 +555,33 @@ export function ProjectView({
         )
       )
       setEditingVideoId(null)
+    }
+  }
+
+  async function handleUpdateVideoProvider(video: VideoEntity, providerId: string | null) {
+    if (!id) return
+    setUpdatingProvider(true)
+    try {
+      const r = await fetch(`/api/projects/${id}/videos/${video.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ metadata: { providerId } }),
+        credentials: "include",
+      })
+      if (r.ok) {
+        const meta = { ...video.metadata, providerId }
+        setVideos((prev) =>
+          prev.map((v) => (v.id === video.id ? { ...v, metadata: meta } : v))
+        )
+        if (selectedVideo?.id === video.id) {
+          setSelectedVideo((prev) => (prev ? { ...prev, metadata: meta } : null))
+          setGlobalSelectedVideo((prev) =>
+            prev && prev.videoId === video.id ? { ...prev, metadata: meta } : prev
+          )
+        }
+      }
+    } finally {
+      setUpdatingProvider(false)
     }
   }
 
@@ -697,10 +739,10 @@ export function ProjectView({
           <AgentReasoningOverlay />
           <>
           {selectedVideo && !showAddForm && (
-            <div className="w-full max-w-4xl mx-auto px-6 pt-3 pb-2 flex items-center gap-2 shrink-0">
+            <div className="w-full max-w-4xl mx-auto px-6 pt-3 pb-2 flex items-center gap-2 shrink-0 flex-wrap">
               {editingVideoId === selectedVideo.id ? (
                 <Input
-                  className="h-8 flex-1 font-medium"
+                  className="h-8 flex-1 font-medium min-w-[120px]"
                   value={editingVideoName}
                   onChange={(e) => setEditingVideoName(e.target.value)}
                   onBlur={() => handleRenameVideo(selectedVideo, editingVideoName)}
@@ -721,6 +763,22 @@ export function ProjectView({
                   <span className="font-medium">{getVideoLabel(selectedVideo)}</span>
                 </div>
               )}
+              <div className="flex items-center gap-2" title="Video provider for crop preset. Set to use global crop per provider in workflow.">
+                <span className="text-xs text-muted-foreground">Provider:</span>
+                <select
+                  className="h-8 rounded-md border border-input bg-background px-2.5 text-sm min-w-[140px] focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-1 disabled:opacity-50"
+                  value={selectedVideo.metadata?.providerId ?? ""}
+                  onChange={(e) => handleUpdateVideoProvider(selectedVideo, e.target.value || null)}
+                  disabled={updatingProvider}
+                >
+                  <option value="">— Select —</option>
+                  {providers.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
           )}
           <div className="flex-1 flex items-center justify-center p-6 min-h-0 min-w-0 overflow-auto">

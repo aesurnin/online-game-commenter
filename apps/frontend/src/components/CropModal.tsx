@@ -18,6 +18,8 @@ interface CropModalProps {
   onSave: (crop: CropPercent) => void;
   videoUrl: string;
   initialCrop?: CropPercent;
+  /** When set, fetch provider crop preset as initial (overrides initialCrop) */
+  providerId?: string | null;
   onTestCrop: (crop: CropPercent & { time: number }) => Promise<string>;
 }
 
@@ -34,7 +36,7 @@ function fromRectCorners(left: number, top: number, right: number, bottom: numbe
 const HANDLE_SIZE = 12;
 const HANDLE_HIT = 16;
 
-export function CropModal({ isOpen, onClose, onSave, videoUrl, initialCrop, onTestCrop }: CropModalProps) {
+export function CropModal({ isOpen, onClose, onSave, videoUrl, initialCrop, providerId, onTestCrop }: CropModalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [videoReady, setVideoReady] = useState(false);
@@ -55,19 +57,41 @@ export function CropModal({ isOpen, onClose, onSave, videoUrl, initialCrop, onTe
 
   useEffect(() => {
     if (isOpen) {
-      const ic = initialCrop;
-      let c: CropPercent;
-      if (!ic) c = { left: 0, top: 0, right: 0, bottom: 0 };
-      else if (ic.left + (ic.right ?? 0) < 100 && ic.top + (ic.bottom ?? 0) < 100)
-        c = ic as CropPercent;
-      else if ("right" in ic && "bottom" in ic && ic.right > ic.left && ic.bottom > ic.top)
-        c = fromRectCorners(ic.left, ic.top, ic.right, ic.bottom);
-      else c = { left: 0, top: 0, right: 0, bottom: 0 };
-      setCrop(c);
-      setPreviewImage(null);
-      setVideoReady(false);
+      const applyCrop = (c: CropPercent) => {
+        setCrop(c);
+        setPreviewImage(null);
+        setVideoReady(false);
+      };
+      if (providerId) {
+        fetch(`/api/providers/${providerId}/crop`, { credentials: "include" })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((data) => {
+            if (data && typeof data.left === "number" && typeof data.top === "number" && typeof data.right === "number" && typeof data.bottom === "number") {
+              applyCrop({ left: data.left, top: data.top, right: data.right, bottom: data.bottom });
+            } else {
+              const ic = initialCrop;
+              const c = !ic ? { left: 0, top: 0, right: 0, bottom: 0 } : ic as CropPercent;
+              applyCrop(c);
+            }
+          })
+          .catch(() => {
+            const ic = initialCrop;
+            const c = !ic ? { left: 0, top: 0, right: 0, bottom: 0 } : ic as CropPercent;
+            applyCrop(c);
+          });
+      } else {
+        const ic = initialCrop;
+        let c: CropPercent;
+        if (!ic) c = { left: 0, top: 0, right: 0, bottom: 0 };
+        else if (ic.left + (ic.right ?? 0) < 100 && ic.top + (ic.bottom ?? 0) < 100)
+          c = ic as CropPercent;
+        else if ("right" in ic && "bottom" in ic && ic.right > ic.left && ic.bottom > ic.top)
+          c = fromRectCorners(ic.left, ic.top, ic.right, ic.bottom);
+        else c = { left: 0, top: 0, right: 0, bottom: 0 };
+        applyCrop(c);
+      }
     }
-  }, [isOpen, initialCrop]);
+  }, [isOpen, initialCrop, providerId]);
 
   const getImageDisplayRect = useCallback(() => {
     const container = containerRef.current;
@@ -323,7 +347,12 @@ export function CropModal({ isOpen, onClose, onSave, videoUrl, initialCrop, onTe
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4">
       <div className="bg-background rounded-lg shadow-lg max-w-5xl w-full max-h-[90vh] flex flex-col">
         <div className="p-4 border-b flex items-center justify-between">
-          <h3 className="font-semibold">Crop Video</h3>
+          <div>
+            <h3 className="font-semibold">Crop Video</h3>
+            {providerId && (
+              <p className="text-xs text-muted-foreground mt-0.5">Using provider preset — saving updates the global crop for this provider</p>
+            )}
+          </div>
           <Button variant="ghost" size="icon" onClick={onClose}>
             <X className="h-4 w-4" />
           </Button>

@@ -52,6 +52,7 @@ import projectsRoutes from './routes/projects.js';
 import providersRoutes from './routes/providers.js';
 import queueRoutes from './routes/queue.js';
 import workflowsRoutes from './routes/workflows.js';
+import contentLibraryRoutes from './routes/content-library.js';
 import { internalRoutes } from './routes/internal.js';
 import envRoutes from './routes/env.js';
 import { startWorkflowWorker } from './workers/workflow.js';
@@ -62,6 +63,7 @@ server.register(projectsRoutes, { prefix: '/projects' });
 server.register(providersRoutes, { prefix: '/providers' });
 server.register(queueRoutes, { prefix: '/queue' });
 server.register(workflowsRoutes, { prefix: '/workflows' });
+server.register(contentLibraryRoutes, { prefix: '/content-library' });
 server.register(internalRoutes, { prefix: '/internal' });
 server.register(envRoutes, { prefix: '/env' });
 

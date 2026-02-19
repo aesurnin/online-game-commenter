@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from "react"
+import ReactMarkdown from "react-markdown"
 import { Button } from "@/components/ui/button"
 import { X } from "lucide-react"
 
@@ -11,6 +12,8 @@ function getPlaceholders(text: string): string[] {
   while ((m = PLACEHOLDER_RE.exec(text)) !== null) set.add(m[1])
   return Array.from(set).sort()
 }
+
+type Tab = "edit" | "preview"
 
 interface PromptBuilderModalProps {
   isOpen: boolean
@@ -30,10 +33,14 @@ export function PromptBuilderModal({
   label = "Prompt",
 }: PromptBuilderModalProps) {
   const [localValue, setLocalValue] = useState(value)
+  const [tab, setTab] = useState<Tab>("edit")
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   useEffect(() => {
-    if (isOpen) setLocalValue(value)
+    if (isOpen) {
+      setLocalValue(value)
+      setTab("edit")
+    }
   }, [isOpen, value])
 
   const insertAtCursor = (insert: string) => {
@@ -63,7 +70,7 @@ export function PromptBuilderModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4">
-      <div className="bg-background rounded-lg shadow-lg max-w-2xl w-full max-h-[90vh] flex flex-col">
+      <div className="bg-background rounded-lg shadow-lg max-w-5xl w-full max-h-[90vh] flex flex-col">
         <div className="p-4 border-b flex items-center justify-between shrink-0">
           <h3 className="font-semibold">{label} — insert variables</h3>
           <Button variant="ghost" size="icon" onClick={onClose} title="Close">
@@ -71,17 +78,59 @@ export function PromptBuilderModal({
           </Button>
         </div>
 
-        <div className="flex-1 overflow-auto p-4 flex flex-col gap-4">
-          <div>
-            <label className="text-xs text-muted-foreground block mb-1.5">Text (use placeholders below)</label>
-            <textarea
-              ref={textareaRef}
-              className="w-full min-h-[160px] rounded-md border border-input bg-background px-3 py-2 text-sm font-mono resize-y"
-              value={localValue}
-              onChange={(e) => setLocalValue(e.target.value)}
-              placeholder="e.g. Summarize the previous step: {{text_1}}"
-              spellCheck={false}
-            />
+        <div className="flex-1 overflow-auto p-4 flex flex-col gap-4 min-h-0">
+          <div className="flex flex-col flex-1 min-h-0">
+            <div className="flex items-center gap-0 mb-1.5">
+              <button
+                type="button"
+                className={`px-3 py-1 text-xs font-medium rounded-t-md border border-b-0 transition-colors ${
+                  tab === "edit"
+                    ? "bg-background text-foreground border-input"
+                    : "bg-muted/50 text-muted-foreground border-transparent hover:text-foreground"
+                }`}
+                onClick={() => setTab("edit")}
+              >
+                Edit
+              </button>
+              <button
+                type="button"
+                className={`px-3 py-1 text-xs font-medium rounded-t-md border border-b-0 transition-colors ${
+                  tab === "preview"
+                    ? "bg-background text-foreground border-input"
+                    : "bg-muted/50 text-muted-foreground border-transparent hover:text-foreground"
+                }`}
+                onClick={() => setTab("preview")}
+              >
+                MD Preview
+              </button>
+            </div>
+
+            {tab === "edit" ? (
+              <textarea
+                ref={textareaRef}
+                className="w-full flex-1 min-h-[400px] rounded-md border border-input bg-background px-3 py-2 text-sm font-mono resize-y"
+                value={localValue}
+                onChange={(e) => setLocalValue(e.target.value)}
+                placeholder="e.g. Summarize the previous step: {{text_1}}"
+                spellCheck={false}
+              />
+            ) : (
+              <div className="flex-1 min-h-[400px] rounded-md border border-input bg-background px-4 py-3 overflow-auto">
+                {localValue.trim() ? (
+                  <article className="prose prose-sm dark:prose-invert max-w-none">
+                    <ReactMarkdown
+                      components={{
+                        pre: ({ children }) => <pre className="whitespace-pre-wrap break-words">{children}</pre>,
+                      }}
+                    >
+                      {localValue}
+                    </ReactMarkdown>
+                  </article>
+                ) : (
+                  <span className="text-sm text-muted-foreground">Nothing to preview</span>
+                )}
+              </div>
+            )}
           </div>
 
           {placeholders.length > 0 && (
@@ -116,7 +165,10 @@ export function PromptBuilderModal({
                     variant="outline"
                     size="sm"
                     className="font-mono text-xs h-8"
-                    onClick={() => insertAtCursor(`{{${name}}}`)}
+                    onClick={() => {
+                      insertAtCursor(`{{${name}}}`)
+                      setTab("edit")
+                    }}
                   >
                     {`{{${name}}}`}
                   </Button>

@@ -18,15 +18,16 @@ import {
 const AGENT_PROTOCOL = `You are an agent that processes tasks step by step.
 You MUST respond with a JSON object on each turn. Available actions:
 
-1. {"action": "think", "content": "your reasoning here"}
-   Use this for intermediate analysis, planning, drafting, reviewing.
+1. {"action": "think", "content": "detailed report for this step"}
+   READ your strategy and count stages. Do exactly that many "think" actions. "done" is NOT a stage.
+   Each "think" must DO the work for that stage: read what the stage asks for and deliver it. Overlap table → include the table. Chronology → include the timeline. Critic review → include the review. No "I analyzed" or "I will create" — put the actual deliverable. The reasoning is saved for audit — make it useful.
 
 2. {"action": "read_variable", "variable": "variableName"}
    Read a file from the workflow context. You will receive its content on the next turn.
 
-3. {"action": "done", "content": "your final answer"}
-   Produce the final result and stop. Use this when you have completed your analysis.
-   Do NOT keep using "think" indefinitely. After a few steps of analysis, you MUST use "done".
+3. {"action": "done", "content": "your actual final output"}
+   Use "done" ONLY when you have completed ALL stages in your strategy. The "content" is saved as the output file.
+   It MUST contain the real deliverable (full JSON, script, markdown) — not a meta-summary.
 
 IMPORTANT: Always respond with valid JSON only. No text outside the JSON object.`;
 
@@ -36,9 +37,9 @@ IMPORTANT: Always respond with valid JSON only. No text outside the JSON object.
 
 const DEFAULT_STRATEGY = `Follow this approach:
 1. Examine the input and understand the task
-2. Plan your approach
-3. Think through each aspect step by step (use "think" for 1-3 steps max)
-4. When ready, use "done" to produce the final answer. Do not keep thinking indefinitely.`;
+2. Use one "think" per step — each step = one detailed report (tables, analysis, findings)
+3. Use "done" with the ACTUAL result only after all steps are done
+4. "done" content = what gets saved. No meta-summaries — put the real deliverable.`;
 
 // ---------------------------------------------------------------------------
 // Module metadata
@@ -356,7 +357,11 @@ export class LlmAgentModule implements WorkflowModule {
         reasoningSteps.push(parsed.content);
         context.onAgentReasoning?.(parsed.content);
 
-        const cont: Msg = { role: 'user', content: 'Continue. If you have completed your analysis, use {"action":"done","content":"..."} to finish.' };
+        const stepNum = reasoningSteps.length;
+        const cont: Msg = {
+          role: 'user',
+          content: `Continue. You have done ${stepNum} think(s). Count stages in your strategy. If ${stepNum} < count — do think for the NEXT stage: do the actual work (tables, analysis, findings), not "I will do X". If ${stepNum} = count — use {"action":"done","content":"..."} now.`,
+        };
         fullHistory.push(cont);
         textHistory.push(cont);
 
@@ -369,9 +374,19 @@ export class LlmAgentModule implements WorkflowModule {
         textHistory.push(varMsg);
 
       } else if (parsed.action === 'done') {
-        onLog?.(`[Agent] Step ${i + 1} [done]: final answer (${parsed.content.length} chars)`);
-        finalAnswer = parsed.content;
-        break;
+        if (reasoningSteps.length === 0) {
+          onLog?.(`[Agent] Step ${i + 1}: model skipped to done without reasoning — requesting think steps first`);
+          const reject: Msg = {
+            role: 'user',
+            content: `You used "done" without any "think" steps. Your strategy requires multiple stages. You MUST use {"action":"think","content":"..."} for each stage first. Each think must DO the work: if a stage asks for a table, include the actual table; if it asks for analysis, include the actual analysis. No vague "I analyzed" — put real content. Start with think for stage 1, then continue until all stages are done. Only then use "done".`,
+          };
+          fullHistory.push(reject);
+          textHistory.push(reject);
+        } else {
+          onLog?.(`[Agent] Step ${i + 1} [done]: final answer (${parsed.content.length} chars)`);
+          finalAnswer = parsed.content;
+          break;
+        }
       }
     }
 

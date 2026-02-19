@@ -3,7 +3,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { CropModal } from "@/components/CropModal"
 import { PromptBuilderModal } from "@/components/PromptBuilderModal"
-import { ScenarioEditorModal } from "@/components/ScenarioEditorModal"
+import { ScenarioEditorModal, parseSlotsFromJson } from "@/components/ScenarioEditorModal"
 import { VariableManagerModal } from "@/components/VariableManagerModal"
 import { ConfirmDialog } from "@/components/ui/confirm-dialog"
 import {
@@ -731,6 +731,15 @@ export function WorkflowEditor() {
         const match = v?.match(/^text_(\d+)$/)
         return match ? Math.max(n, parseInt(match[1], 10)) : n
       }, 0) + 1
+    const nextAudioNum =
+      prevModules.reduce((n, m) => {
+        const vals = Object.values(m.outputs ?? {})
+        for (const v of vals) {
+          const match = typeof v === "string" ? v.match(/^audio_(\d+)$/) : null
+          if (match) n = Math.max(n, parseInt(match[1], 10))
+        }
+        return n
+      }, 0) + 1
     const inputs: Record<string, string> = {}
     const outputs: Record<string, string> = {}
     for (const slot of meta?.inputSlots ?? []) {
@@ -747,6 +756,9 @@ export function WorkflowEditor() {
       }
       if (slot.kind === "text") {
         outputs[slot.key] = `text_${nextTextNum}`
+      }
+      if (slot.kind === "file") {
+        outputs[slot.key] = `audio_${nextAudioNum}`
       }
     }
     const newMod: WorkflowModuleDef = {
@@ -1557,6 +1569,8 @@ function ModuleBlock({
   const params = module.params ?? {}
   const paramsSchema = meta?.paramsSchema ?? []
   const [scenarioSlots, setScenarioSlots] = useState<Array<{ key: string; kind: string; label?: string }> | null>(null)
+  const [audioLibraryOptions, setAudioLibraryOptions] = useState<Array<{ value: string; label: string }> | null>(null)
+  const [audioTags, setAudioTags] = useState<string[] | null>(null)
 
   useEffect(() => {
     if (module.type !== "llm.scenario.generator" || !projectId || !videoId || status !== "done") {
@@ -1576,6 +1590,26 @@ function ModuleBlock({
     return () => { cancelled = true }
   }, [module.type, module.id, projectId, videoId, status])
 
+  useEffect(() => {
+    if (module.type !== "audio.library.select") {
+      setAudioLibraryOptions(null)
+      setAudioTags(null)
+      return
+    }
+    let cancelled = false
+    Promise.all([
+      fetch("/api/content-library/audio?forSelect=1", { credentials: "include" }).then((r) => (r.ok ? r.json() : [])),
+      fetch("/api/content-library/audio/tags", { credentials: "include" }).then((r) => (r.ok ? r.json() : [])),
+    ]).then(([list, tags]: [Array<{ id: string; name: string }>, string[]]) => {
+      if (cancelled) return
+      setAudioLibraryOptions(list.map((i) => ({ value: i.id, label: i.name })))
+      setAudioTags(Array.isArray(tags) ? tags : [])
+    }).catch(() => {
+      if (!cancelled) setAudioLibraryOptions(null)
+    })
+    return () => { cancelled = true }
+  }, [module.type])
+
   const paramsToShow = expanded
     ? paramsSchema.filter((p) => {
         if (module.type === "video.render.remotion") {
@@ -1585,6 +1619,11 @@ function ModuleBlock({
         if (module.type === "llm.scenario.generator") {
           if (p.key === "sceneJson") return false
           if (p.key === "prompt") return false
+        }
+        if (module.type === "audio.library.select") {
+          const mode = String(params.mode ?? "fixed")
+          if (p.key === "audioId" && mode !== "fixed") return false
+          if (p.key === "randomTag" && mode !== "random_by_tag") return false
         }
         return true
       })
@@ -1695,20 +1734,41 @@ function ModuleBlock({
           />
         )
       })()}
-      {p.type === "string" && (
-        p.options ? (
-          <select
-            className="h-7 rounded-md border border-input bg-background px-2 text-xs flex-1"
-            value={String(params[p.key] ?? p.default ?? "")}
-            onChange={(e) => onParamsChange({ ...params, [p.key]: e.target.value })}
-          >
-            {p.options.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-        ) : (
+      {p.type === "string" && (() => {
+        const isAudioLibrarySelect = module.type === "audio.library.select" && p.key === "audioId"
+        const isAudioRandomTag = module.type === "audio.library.select" && p.key === "randomTag"
+        const tagOptions = (audioTags ?? []).map((t) => ({ value: t, label: t }))
+        const options = isAudioLibrarySelect ? audioLibraryOptions : isAudioRandomTag ? tagOptions : p.options
+        if (isAudioRandomTag && tagOptions.length === 0) {
+          return (
+            <Input
+              type="text"
+              className="h-7 text-xs flex-1"
+              value={String(params[p.key] ?? p.default ?? "")}
+              onChange={(e) => onParamsChange({ ...params, [p.key]: e.target.value })}
+              placeholder="Enter tag (add tags to audio items in Content Library)"
+            />
+          )
+        }
+        if (options && options.length > 0) {
+          return (
+            <select
+              className="h-7 rounded-md border border-input bg-background px-2 text-xs flex-1"
+              value={String(params[p.key] ?? p.default ?? "")}
+              onChange={(e) => onParamsChange({ ...params, [p.key]: e.target.value })}
+              disabled={isAudioLibrarySelect && audioLibraryOptions === null}
+            >
+              {isAudioLibrarySelect && <option value="">— Select —</option>}
+              {isAudioRandomTag && <option value="">— Select tag —</option>}
+              {options.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          )
+        }
+        return (
           <Input
             type="text"
             className="h-7 text-xs flex-1"
@@ -1716,7 +1776,7 @@ function ModuleBlock({
             onChange={(e) => onParamsChange({ ...params, [p.key]: e.target.value })}
           />
         )
-      )}
+      })()}
       {p.type === "boolean" && (
         <input
           type="checkbox"
@@ -1851,7 +1911,13 @@ function ModuleBlock({
           </div>
           {(() => {
             let slots: ModuleSlotDef[] = [...(meta?.inputSlots ?? [])]
-            const effectiveScenarioSlots = status === "done" ? (scenarioSlots ?? previewSlots) : (previewSlots ?? scenarioSlots)
+            const slotsFromJson = parseSlotsFromJson(String(params.sceneJson ?? ""))
+            const effectiveScenarioSlots =
+              slotsFromJson.length > 0
+                ? slotsFromJson
+                : status === "done"
+                  ? (scenarioSlots ?? previewSlots)
+                  : (previewSlots ?? scenarioSlots)
             if (module.type === "llm.scenario.generator" && effectiveScenarioSlots?.length) {
               slots = [...slots, ...effectiveScenarioSlots.map((s) => ({
                 key: s.key,
@@ -1928,17 +1994,12 @@ function ModuleBlock({
                 <div className="flex-1 flex items-center gap-1.5">
                   <select
                     className="h-7 rounded-md border border-input bg-background px-2 text-xs flex-1"
-                    value={
-                      module.inputs?.[slot.key] ??
-                      (slot.kind === "video" ? (index === 0 ? "source" : getAvailableVariablesByKind("video").pop() ?? "source") : "")
-                    }
+                    value={module.inputs?.[slot.key] ?? ""}
                     onChange={(e) =>
                       onInputsChange({ ...(module.inputs ?? {}), [slot.key]: e.target.value })
                     }
                   >
-                    {(slot.kind === "file" || slot.kind === "text") && (
-                      <option value="">— None —</option>
-                    )}
+                    <option value="">— None —</option>
                     {getAvailableVariablesByKind(slot.kind).map((v) => (
                       <option key={v} value={v}>
                         ({v})

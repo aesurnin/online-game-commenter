@@ -68,3 +68,15 @@ export const appEnv = pgTable('app_env', {
   key: text('key').primaryKey(),
   value: text('value').notNull().default(''),
 });
+
+/** Global content library (audio, etc.) for use in workflows. */
+export const contentLibraryItems = pgTable('content_library_item', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  type: text('type').notNull().default('audio'),
+  name: text('name').notNull(),
+  tags: jsonb('tags').$type<string[]>().default([]),
+  r2Key: text('r2_key').notNull(),
+  mimeType: text('mime_type'),
+  ownerId: text('owner_id').references(() => users.id),
+  createdAt: timestamp('created_at').defaultNow(),
+});

@@ -7,6 +7,7 @@ import { LlmAgentModule } from './modules/llm-agent.js';
 import { TtsElevenlabsModule } from './modules/tts-elevenlabs.js';
 import { VideoRenderRemotionModule } from './modules/video-render-remotion.js';
 import { LlmScenarioGeneratorModule } from './modules/llm-scenario-generator.js';
+import { AudioLibrarySelectModule } from './modules/audio-library-select.js';
 
 const modules = new Map<string, WorkflowModule>();
 
@@ -22,6 +23,7 @@ register(new LlmAgentModule());
 register(new TtsElevenlabsModule());
 register(new VideoRenderRemotionModule());
 register(new LlmScenarioGeneratorModule());
+register(new AudioLibrarySelectModule());
 
 export function getModule(type: string): WorkflowModule | undefined {
   return modules.get(type);

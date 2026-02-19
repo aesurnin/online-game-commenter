@@ -183,6 +183,9 @@ export function Dashboard() {
           <Button variant="ghost" size="sm" onClick={() => navigate("/providers")}>
             Providers
           </Button>
+          <Button variant="ghost" size="sm" onClick={() => navigate("/content-library")}>
+            Content Library
+          </Button>
         </div>
         <div className="flex items-center gap-2">
           <Button

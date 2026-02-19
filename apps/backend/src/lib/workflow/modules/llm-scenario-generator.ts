@@ -20,7 +20,9 @@ SCHEMA (use ONLY these fields — others are ignored):
 
 {
   "slots": [
-    { "key": "slot_key", "kind": "video" | "text" | "file", "label": "Human-readable label" }
+    { "key": "main_video", "kind": "video", "label": "Main Video" },
+    { "key": "voice_input", "kind": "file", "label": "Voice Input" },
+    { "key": "background_music", "kind": "file", "label": "Background Music" }
   ],
   "scene": {
     "width": 1920,
@@ -35,7 +37,8 @@ SCHEMA (use ONLY these fields — others are ignored):
     "clips": [
       { "type": "video", "src": "{{slot_key}}", "from": 0, "durationInFrames": 90, "layout": "cover", "volume": 1 },
       { "type": "text", "text": "Literal text or {{slot_key}}", "from": 0, "durationInFrames": 90, "position": "bottom", "fontSize": 48, "color": "#ffffff" },
-      { "type": "audio", "src": "{{slot_key}}", "from": 0, "durationInFrames": 180, "volume": 1 }
+      { "type": "audio", "src": "{{voice_input}}", "from": 0, "durationInFrames": 180, "volume": 1 },
+      { "type": "audio", "src": "{{background_music}}", "from": 0, "durationInFrames": 180, "volume": 0.5 }
     ]
   }
 }
@@ -62,6 +65,11 @@ TEXT CLIP (type "text"):
 AUDIO CLIP (type "audio"):
 - src: "{{slot_key}}", from, durationInFrames
 - volume: number (0 = mute, 1 = normal, >1 = amplify, e.g. 1.5 or 2, optional, default 1)
+
+MULTIPLE AUDIO:
+- You MAY add multiple audio clips (e.g. voice_input for narration, background_music for music).
+- Each audio clip needs its own slot in "slots" with kind "file".
+- Example slots: main_video (video), voice_input (file), background_music (file).
 
 RULES:
 - "slots" defines variables the user connects. Each slot: key, kind (video|text|file), label.

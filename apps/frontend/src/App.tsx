@@ -9,6 +9,7 @@ import { Dashboard } from "@/pages/Dashboard"
 import { ProjectView } from "@/pages/ProjectView"
 import { QueueMonitor } from "@/pages/QueueMonitor"
 import { Providers } from "@/pages/Providers"
+import { ContentLibrary } from "@/pages/ContentLibrary"
 import { LogsProvider, useLogs } from "@/contexts/LogsContext"
 import { SelectedVideoProvider } from "@/contexts/SelectedVideoContext"
 import { PreviewVideoProvider } from "@/contexts/PreviewVideoContext"
@@ -94,6 +95,9 @@ function AppHeader() {
           <Button variant="ghost" size="sm" onClick={() => navigate("/providers")}>
             Providers
           </Button>
+          <Button variant="ghost" size="sm" onClick={() => navigate("/content-library")}>
+            Content Library
+          </Button>
           {isProjectPage && project && (
             <>
               {editingProjectName ? (
@@ -176,6 +180,7 @@ function AppLayout() {
     else if (location.pathname === "/dashboard") document.title = `Dashboard | ${base}`
     else if (location.pathname === "/queue") document.title = `Queue | ${base}`
     else if (location.pathname === "/providers") document.title = `Providers | ${base}`
+    else if (location.pathname === "/content-library") document.title = `Content Library | ${base}`
     else if (location.pathname.startsWith("/projects/")) document.title = `Project | ${base}`
     else document.title = base
   }, [location.pathname])
@@ -269,6 +274,7 @@ function AppLayout() {
             <Route path="/projects/:id" element={<ProjectView />} />
             <Route path="/queue" element={<QueueMonitor />} />
             <Route path="/providers" element={<Providers />} />
+            <Route path="/content-library" element={<ContentLibrary />} />
             <Route path="/" element={<Navigate to="/dashboard" replace />} />
             <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Routes>
@@ -289,6 +295,7 @@ function AppLayout() {
             <Route path="/projects/:id" element={<ProjectView />} />
             <Route path="/queue" element={<QueueMonitor />} />
             <Route path="/providers" element={<Providers />} />
+            <Route path="/content-library" element={<ContentLibrary />} />
             <Route path="/" element={<Navigate to="/dashboard" replace />} />
             <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Routes>
@@ -357,6 +364,7 @@ function AppLayout() {
                 />
                 <Route path="/queue" element={<QueueMonitor />} />
                 <Route path="/providers" element={<Providers />} />
+                <Route path="/content-library" element={<ContentLibrary />} />
                 <Route path="/" element={<Navigate to="/dashboard" replace />} />
                 <Route path="*" element={<Navigate to="/dashboard" replace />} />
               </Routes>

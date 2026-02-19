@@ -109,7 +109,6 @@ export class TtsElevenlabsModule implements WorkflowModule {
     const outputFormat = String(params.outputFormat ?? 'mp3_44100_128');
     const stability = Math.max(0, Math.min(1, Number(params.stability) ?? 0.5));
     const similarityBoost = Math.max(0, Math.min(1, Number(params.similarityBoost) ?? 0.75));
-
     onLog?.('[TTS ElevenLabs] === Module start ===');
     onLog?.(`[TTS ElevenLabs] Input: "${textPath}"`);
     onLog?.(`[TTS ElevenLabs] Voice: ${voiceId}, Model: ${modelId}`);
@@ -191,6 +190,7 @@ export class TtsElevenlabsModule implements WorkflowModule {
     }
 
     onProgress?.(85, 'Merging audio segments');
+    onLog?.(`[TTS ElevenLabs] Cached segments dir: ${segmentsDir}`);
     onLog?.('[TTS ElevenLabs] Merging segments with timing...');
 
     const outputPath = path.join(outDir, 'output.mp3');
@@ -203,7 +203,8 @@ export class TtsElevenlabsModule implements WorkflowModule {
       filterParts.push(`[${i}:a]adelay=${delayMs}|${delayMs}[a${i}]`);
     }
     const mixInputs = segmentPaths.map((_, i) => `[a${i}]`).join('');
-    filterParts.push(`${mixInputs}amix=inputs=${segmentPaths.length}:duration=longest[aout]`);
+    // normalize=0: prevents amix from re-balancing volume as earlier segments end
+    filterParts.push(`${mixInputs}amix=inputs=${segmentPaths.length}:duration=longest:normalize=0[aout]`);
     const filterComplex = filterParts.join(';');
 
     const ok = await new Promise<boolean>((resolve) => {

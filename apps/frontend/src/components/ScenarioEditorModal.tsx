@@ -2,7 +2,7 @@ import { useState, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { X, Sparkles, Loader2 } from "lucide-react"
 
-function parseSlotsFromJson(jsonStr: string): Array<{ key: string; kind: string; label?: string }> {
+export function parseSlotsFromJson(jsonStr: string): Array<{ key: string; kind: string; label?: string }> {
   const trimmed = jsonStr.trim()
   if (!trimmed) return []
   try {

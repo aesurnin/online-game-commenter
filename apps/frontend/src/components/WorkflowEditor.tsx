@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react"
+import { createPortal } from "react-dom"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { CropModal } from "@/components/CropModal"
@@ -29,6 +30,7 @@ import {
   Eraser,
   Clock,
   DollarSign,
+  HelpCircle,
 } from "lucide-react"
 import { useSelectedVideo } from "@/contexts/SelectedVideoContext"
 import { useLogs } from "@/contexts/LogsContext"
@@ -76,6 +78,42 @@ type ModuleMeta = {
 type StepStatus = "pending" | "running" | "done" | "error"
 
 type TokenUsage = { prompt_tokens: number; completion_tokens: number; total_tokens: number }
+
+function TtsCommentsJsonHelp({ content }: { content: string }) {
+  const [hover, setHover] = useState(false)
+  const [pos, setPos] = useState({ x: 0, y: 0 })
+  const ref = useRef<HTMLSpanElement>(null)
+  const handleMouseEnter = () => {
+    const rect = ref.current?.getBoundingClientRect()
+    if (rect) {
+      setPos({ x: rect.left, y: rect.top })
+      setHover(true)
+    }
+  }
+  const handleMouseLeave = () => setHover(false)
+  return (
+    <>
+      <span
+        ref={ref}
+        className="inline-flex cursor-help text-muted-foreground/70 hover:text-muted-foreground"
+        onMouseEnter={handleMouseEnter}
+        onMouseLeave={handleMouseLeave}
+      >
+        <HelpCircle className="h-3 w-3" />
+      </span>
+      {hover &&
+        createPortal(
+          <div
+            className="fixed z-[9999] bg-background border border-border rounded-md shadow-lg px-2 py-1.5 text-xs max-w-[320px] break-words whitespace-normal text-foreground pointer-events-none"
+            style={{ left: pos.x, top: pos.y - 8, transform: "translateY(-100%)" }}
+          >
+            {content}
+          </div>,
+          document.body
+        )}
+    </>
+  )
+}
 
 type VideoWorkflowState = {
   currentWorkflowId: string | null
@@ -882,7 +920,26 @@ export function WorkflowEditor() {
     const b = nextStatuses[newIdx]
     nextStatuses[index] = b ?? "pending"
     nextStatuses[newIdx] = a ?? "pending"
-    updateVideoState(videoId, { workflow: { ...workflow, modules: arr }, stepStatuses: nextStatuses })
+    const swapByIndex = <T,>(rec: Record<number, T>): Record<number, T> => {
+      const next = { ...rec }
+      const va = next[index]
+      const vb = next[newIdx]
+      if (vb !== undefined) next[index] = vb
+      else delete next[index]
+      if (va !== undefined) next[newIdx] = va
+      else delete next[newIdx]
+      return next
+    }
+    const nextOutputUrls = swapByIndex(stepOutputUrls)
+    const nextContentTypes = swapByIndex(stepOutputContentTypes)
+    const nextRemotionUrls = swapByIndex(stepRemotionSceneUrls)
+    updateVideoState(videoId, {
+      workflow: { ...workflow, modules: arr },
+      stepStatuses: nextStatuses,
+      stepOutputUrls: nextOutputUrls,
+      stepOutputContentTypes: nextContentTypes,
+      stepRemotionSceneUrls: nextRemotionUrls,
+    })
   }
 
   const updateModuleParams = (index: number, params: Record<string, unknown>) => {
@@ -917,7 +974,12 @@ export function WorkflowEditor() {
     updateVideoState(videoId, { workflow: { ...workflow, modules: mods } })
   }
 
-  /** Rename variable globally: replace oldName with newName in all module inputs and outputs. */
+  /**
+   * Rename variable: replace oldName with newName in all module INPUTS only.
+   * Outputs are NOT replaced — each module's output is edited independently.
+   * This avoids the bug where two modules with the same output name would both
+   * get renamed when editing one of them.
+   */
   const renameVariableInWorkflow = (oldName: string, newName: string) => {
     if (!videoId || !workflow || !oldName || !newName || oldName === newName || oldName === "source") return
     const mods = workflow.modules.map((m) => {
@@ -925,10 +987,7 @@ export function WorkflowEditor() {
       const inputs = m.inputs
         ? Object.fromEntries(Object.entries(m.inputs).map(([k, v]) => [k, replace(v)]))
         : undefined
-      const outputs = m.outputs
-        ? Object.fromEntries(Object.entries(m.outputs).map(([k, v]) => [k, replace(v)]))
-        : undefined
-      return { ...m, ...(inputs && { inputs }), ...(outputs && { outputs }) }
+      return { ...m, ...(inputs && { inputs }) }
     })
     updateVideoState(videoId, { workflow: { ...workflow, modules: mods } })
   }
@@ -1150,9 +1209,29 @@ export function WorkflowEditor() {
     }
   }
 
-  const handleOpenCrop = (index: number) => {
+  const [cropInputVideoUrl, setCropInputVideoUrl] = useState<string | null>(null)
+
+  const handleOpenCrop = async (index: number) => {
     setCropModuleIndex(index)
     setCropModalOpen(true)
+    setCropInputVideoUrl(null)
+    if (!projectId || !videoId || !currentWorkflowId || !workflow) return
+    try {
+      const r = await fetch(`/api/workflows/${currentWorkflowId}/crop-input-video`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ projectId, videoId, workflow, stepIndex: index }),
+      })
+      if (r.ok) {
+        const { url } = await r.json()
+        setCropInputVideoUrl(url)
+      } else {
+        setCropInputVideoUrl(selectedVideo?.streamUrl ?? selectedVideo?.playUrl ?? "")
+      }
+    } catch {
+      setCropInputVideoUrl(selectedVideo?.streamUrl ?? selectedVideo?.playUrl ?? "")
+    }
   }
 
   const handleSaveCrop = async (crop: { left: number; top: number; right: number; bottom: number }) => {
@@ -1177,12 +1256,12 @@ export function WorkflowEditor() {
   }
 
   const handleTestCrop = async (crop: { left: number; top: number; right: number; bottom: number; time: number }) => {
-    if (!projectId || !videoId || !currentWorkflowId) throw new Error("Missing context")
+    if (!projectId || !videoId || !currentWorkflowId || !workflow || cropModuleIndex === null) throw new Error("Missing context")
     const r = await fetch(`/api/workflows/${currentWorkflowId}/test-crop`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
-      body: JSON.stringify({ projectId, videoId, ...crop }),
+      body: JSON.stringify({ projectId, videoId, workflow, stepIndex: cropModuleIndex, ...crop }),
     })
     if (!r.ok) throw new Error("Failed to generate preview")
     const data = await r.json()
@@ -1474,12 +1553,12 @@ export function WorkflowEditor() {
         )
       })()}
 
-      {cropModalOpen && cropModuleIndex !== null && workflow && (selectedVideo?.streamUrl ?? selectedVideo?.playUrl) && (
+      {cropModalOpen && cropModuleIndex !== null && workflow && (cropInputVideoUrl ?? selectedVideo?.streamUrl ?? selectedVideo?.playUrl) && (
         <CropModal
           isOpen={cropModalOpen}
-          onClose={() => setCropModalOpen(false)}
+          onClose={() => { setCropModalOpen(false); setCropInputVideoUrl(null) }}
           onSave={handleSaveCrop}
-          videoUrl={selectedVideo!.streamUrl ?? selectedVideo!.playUrl!}
+          videoUrl={cropInputVideoUrl ?? selectedVideo!.streamUrl ?? selectedVideo!.playUrl!}
           providerId={selectedVideo?.metadata?.providerId ?? null}
           initialCrop={(() => {
             const p = workflow.modules[cropModuleIndex].params ?? {};
@@ -1571,6 +1650,7 @@ function ModuleBlock({
   const [scenarioSlots, setScenarioSlots] = useState<Array<{ key: string; kind: string; label?: string }> | null>(null)
   const [audioLibraryOptions, setAudioLibraryOptions] = useState<Array<{ value: string; label: string }> | null>(null)
   const [audioTags, setAudioTags] = useState<string[] | null>(null)
+  const [imageLibraryOptions, setImageLibraryOptions] = useState<Array<{ value: string; label: string }> | null>(null)
 
   useEffect(() => {
     if (module.type !== "llm.scenario.generator" || !projectId || !videoId || status !== "done") {
@@ -1607,6 +1687,24 @@ function ModuleBlock({
     }).catch(() => {
       if (!cancelled) setAudioLibraryOptions(null)
     })
+    return () => { cancelled = true }
+  }, [module.type])
+
+  useEffect(() => {
+    if (module.type !== "video.heygen.avatar" && module.type !== "video.fal.veed-fabric") {
+      setImageLibraryOptions(null)
+      return
+    }
+    let cancelled = false
+    fetch("/api/content-library/image?forSelect=1", { credentials: "include" })
+      .then((r) => (r.ok ? r.json() : []))
+      .then((list: Array<{ id: string; name: string }>) => {
+        if (cancelled) return
+        setImageLibraryOptions(list.map((i) => ({ value: i.id, label: i.name })))
+      })
+      .catch(() => {
+        if (!cancelled) setImageLibraryOptions(null)
+      })
     return () => { cancelled = true }
   }, [module.type])
 
@@ -1737,8 +1835,11 @@ function ModuleBlock({
       {p.type === "string" && (() => {
         const isAudioLibrarySelect = module.type === "audio.library.select" && p.key === "audioId"
         const isAudioRandomTag = module.type === "audio.library.select" && p.key === "randomTag"
+        const isHeyGenImageId = module.type === "video.heygen.avatar" && p.key === "imageId"
+        const isFalImageId = module.type === "video.fal.veed-fabric" && p.key === "imageId"
+        const isAnyImageId = isHeyGenImageId || isFalImageId
         const tagOptions = (audioTags ?? []).map((t) => ({ value: t, label: t }))
-        const options = isAudioLibrarySelect ? audioLibraryOptions : isAudioRandomTag ? tagOptions : p.options
+        const options = isAudioLibrarySelect ? audioLibraryOptions : isAnyImageId ? imageLibraryOptions : isAudioRandomTag ? tagOptions : p.options
         if (isAudioRandomTag && tagOptions.length === 0) {
           return (
             <Input
@@ -1750,22 +1851,39 @@ function ModuleBlock({
             />
           )
         }
-        if (options && options.length > 0) {
+        if (isAnyImageId && imageLibraryOptions && imageLibraryOptions.length === 0) {
           return (
-            <select
-              className="h-7 rounded-md border border-input bg-background px-2 text-xs flex-1"
-              value={String(params[p.key] ?? p.default ?? "")}
-              onChange={(e) => onParamsChange({ ...params, [p.key]: e.target.value })}
-              disabled={isAudioLibrarySelect && audioLibraryOptions === null}
-            >
-              {isAudioLibrarySelect && <option value="">— Select —</option>}
-              {isAudioRandomTag && <option value="">— Select tag —</option>}
-              {options.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
+            <span className="text-xs text-muted-foreground flex-1">
+              No images in library. Add avatar images in Content Library → Images.
+            </span>
+          )
+        }
+        if (options && options.length > 0) {
+          const selectedId = String(params[p.key] ?? p.default ?? "")
+          return (
+            <div className="flex-1 flex items-center gap-2 min-w-0">
+              {isAnyImageId && selectedId && (
+                <img
+                  src={`/api/content-library/image/${selectedId}/file`}
+                  alt=""
+                  className="h-10 w-10 object-cover rounded shrink-0 border border-border"
+                />
+              )}
+              <select
+                className="h-7 rounded-md border border-input bg-background px-2 text-xs flex-1 min-w-0"
+                value={selectedId}
+                onChange={(e) => onParamsChange({ ...params, [p.key]: e.target.value })}
+                disabled={(isAudioLibrarySelect && audioLibraryOptions === null) || (isAnyImageId && imageLibraryOptions === null)}
+              >
+                {(isAudioLibrarySelect || isAnyImageId) && <option value="">— Select —</option>}
+                {isAudioRandomTag && <option value="">— Select tag —</option>}
+                {options.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </div>
           )
         }
         return (
@@ -1988,9 +2106,17 @@ function ModuleBlock({
                 )
               }
 
+              const ttsCommentsJsonTooltip = module.type === "tts.elevenlabs" && slot.key === "text"
+                ? "Expected JSON array of segments: [{ \"time\": \"MM:SS\" or \"HH:MM:SS\", \"text\": \"speech text\" }]. Optional: duration, comment_for_ai_assistent."
+                : undefined
               return (
               <div key={slot.key} className="flex items-center gap-2">
-                <label className="text-xs text-muted-foreground w-20 shrink-0">{slot.label}</label>
+                <label className="text-xs text-muted-foreground w-20 shrink-0 flex items-center gap-1">
+                  {slot.label}
+                  {ttsCommentsJsonTooltip && (
+                    <TtsCommentsJsonHelp content={ttsCommentsJsonTooltip} />
+                  )}
+                </label>
                 <div className="flex-1 flex items-center gap-1.5">
                   <select
                     className="h-7 rounded-md border border-input bg-background px-2 text-xs flex-1"

@@ -57,8 +57,11 @@ export function ContentLibrary() {
   const navigate = useNavigate()
   const { addLog } = useLogs()
 
+  const apiPath = category === "audio" ? "audio" : category === "images" ? "image" : null
+
   async function fetchItems() {
-    const r = await fetch("/api/content-library/audio", { credentials: "include" })
+    if (!apiPath) return []
+    const r = await fetch(`/api/content-library/${apiPath}`, { credentials: "include" })
     if (!r.ok) {
       if (r.status === 401) navigate("/login")
       return []
@@ -71,9 +74,9 @@ export function ContentLibrary() {
   }, [])
 
   useEffect(() => {
-    if (category === "audio") {
+    if (category === "audio" || category === "images") {
       setLoading(true)
-      addLog("[Content Library] Loading audio…")
+      addLog(`[Content Library] Loading ${category}…`)
       fetchItems().then((list) => {
         setItems(list)
         setLoading(false)
@@ -106,7 +109,7 @@ export function ContentLibrary() {
 
   async function handleUpload(e: React.FormEvent) {
     e.preventDefault()
-    if (files.length === 0) {
+    if (files.length === 0 || !apiPath) {
       addLog("[Content Library] Select files first", "error")
       return
     }
@@ -115,7 +118,7 @@ export function ContentLibrary() {
     try {
       const formData = new FormData()
       files.forEach((f) => formData.append("file", f))
-      const r = await fetch("/api/content-library/audio", {
+      const r = await fetch(`/api/content-library/${apiPath}`, {
         method: "POST",
         credentials: "include",
         body: formData,
@@ -140,10 +143,10 @@ export function ContentLibrary() {
 
   async function handleUpdate(e: React.FormEvent) {
     e.preventDefault()
-    if (!editingId) return
+    if (!editingId || !apiPath) return
     addLog(`[Content Library] Updating: ${editName}`)
     try {
-      const r = await fetch(`/api/content-library/audio/${editingId}`, {
+      const r = await fetch(`/api/content-library/${apiPath}/${editingId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
@@ -167,10 +170,10 @@ export function ContentLibrary() {
   }
 
   async function handleDelete() {
-    if (!deleteConfirm) return
+    if (!deleteConfirm || !apiPath) return
     addLog(`[Content Library] Deleting: ${deleteConfirm.name}`)
     try {
-      const r = await fetch(`/api/content-library/audio/${deleteConfirm.id}`, {
+      const r = await fetch(`/api/content-library/${apiPath}/${deleteConfirm.id}`, {
         method: "DELETE",
         credentials: "include",
       })
@@ -226,7 +229,7 @@ export function ContentLibrary() {
 
       {/* Right content */}
       <main className="flex-1 min-w-0 flex flex-col">
-        {category === "audio" ? (
+        {(category === "audio" || category === "images") ? (
           <>
             {/* Toolbar */}
             <div className="shrink-0 flex items-center gap-2 px-3 py-2 border-b">
@@ -284,7 +287,7 @@ export function ContentLibrary() {
               >
                 <input
                   type="file"
-                  accept=".mp3,.wav,.m4a,.ogg"
+                  accept={category === "images" ? ".jpg,.jpeg,.png" : ".mp3,.wav,.m4a,.ogg"}
                   multiple
                   onChange={(e) => setFiles(Array.from(e.target.files ?? []))}
                   className="text-xs file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:font-medium file:bg-primary file:text-primary-foreground"
@@ -315,7 +318,7 @@ export function ContentLibrary() {
               {filteredAndSorted.length === 0 ? (
                 <div className="p-6 text-center text-sm text-muted-foreground">
                   {items.length === 0
-                    ? "No audio. Click Upload to add."
+                    ? (category === "images" ? "No images. Click Upload to add." : "No audio. Click Upload to add.")
                     : "No matches for your search."}
                 </div>
               ) : (
@@ -344,7 +347,15 @@ export function ContentLibrary() {
                           )}
                         </button>
                         <div className="flex items-center gap-2 min-w-0">
-                          <Music className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                          {category === "images" ? (
+                            <img
+                              src={`/api/content-library/image/${item.id}/file`}
+                              alt=""
+                              className="h-8 w-8 object-cover rounded shrink-0"
+                            />
+                          ) : (
+                            <Music className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                          )}
                           <span className="truncate font-medium" title={item.name}>
                             {item.name}
                           </span>
@@ -375,12 +386,20 @@ export function ContentLibrary() {
                       </div>
                       {expandedId === item.id && (
                         <div className="px-4 py-2 bg-muted/10 border-t border-border/30">
-                          <audio
-                            src={`/api/content-library/audio/${item.id}/file`}
-                            controls
-                            className="w-full max-w-md h-8"
-                            preload="metadata"
-                          />
+                          {category === "images" ? (
+                            <img
+                              src={`/api/content-library/image/${item.id}/file`}
+                              alt={item.name}
+                              className="max-h-48 max-w-md object-contain rounded"
+                            />
+                          ) : (
+                            <audio
+                              src={`/api/content-library/audio/${item.id}/file`}
+                              controls
+                              className="w-full max-w-md h-8"
+                              preload="metadata"
+                            />
+                          )}
                         </div>
                       )}
                     </div>
@@ -437,7 +456,7 @@ export function ContentLibrary() {
       <ConfirmDialog
         open={!!deleteConfirm}
         onOpenChange={(open) => !open && setDeleteConfirm(null)}
-        title="Delete audio"
+        title={category === "images" ? "Delete image" : "Delete audio"}
         message={deleteConfirm ? `Delete "${deleteConfirm.name}"? This cannot be undone.` : ""}
         confirmLabel="Delete"
         variant="destructive"

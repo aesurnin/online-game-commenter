@@ -24,7 +24,7 @@ The LLM Scenario Generator (`llm.scenario.generator`) produces JSON that is cons
 
 **Scene-level**: width, height, fps, durationInFrames, backgroundColor, blurredBackground, blurredBackgroundRadius, blurredBackgroundScale, blurredBackgroundVolume, clips
 
-**Video clip**: type, src, from, durationInFrames, layout (fill|contain|cover), volume (0 = mute, 1 = normal, >1 = amplify)
+**Video clip**: type, src, from, durationInFrames, layout (fill|contain|cover), volume (0 = mute, 1 = normal, >1 = amplify), x (% offset horizontal, default 0), y (% offset vertical, negative = up, default 0), scale (factor, default 1), opacity (0–1, default 1)
 
 **Text clip**: type, text, from, durationInFrames, position (bottom|top|center), fontSize, color
 

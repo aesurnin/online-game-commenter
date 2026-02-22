@@ -55,6 +55,10 @@ VIDEO CLIP (type "video"):
 - src: "{{slot_key}}" (required), from, durationInFrames
 - layout: "fill" | "contain" | "cover" (optional, default "contain")
 - volume: number (0 = mute, 1 = normal, >1 = amplify, e.g. 1.5 or 2, optional, default 1)
+- x: number — horizontal offset as % of scene width; negative = left, positive = right (optional, default 0)
+- y: number — vertical offset as % of scene height; negative = up, positive = down (optional, default 0)
+- scale: number — scale factor; 1 = natural size, 0.5 = half size, 2 = double size (optional, default 1)
+- opacity: number — 0 (transparent) to 1 (fully opaque) (optional, default 1)
 
 TEXT CLIP (type "text"):
 - text: string (literal or "{{slot_key}}" for variable), from, durationInFrames
@@ -74,7 +78,6 @@ MULTIPLE AUDIO:
 RULES:
 - "slots" defines variables the user connects. Each slot: key, kind (video|text|file), label.
 - Use {{slot_key}} placeholders in src/text — system substitutes with file paths.
-- Do NOT add width, height, scale, blur, opacity, position to clips — they are ignored.
 - Respond with ONLY the JSON object. No markdown, no explanation.`;
 
 // ---------------------------------------------------------------------------

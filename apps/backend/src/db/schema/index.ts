@@ -1,4 +1,4 @@
-import { integer, pgTable, text, timestamp, uuid, jsonb } from 'drizzle-orm/pg-core';
+import { integer, real, pgTable, text, timestamp, uuid, jsonb } from 'drizzle-orm/pg-core';
 
 export const users = pgTable('user', {
   id: text('id').primaryKey(),
@@ -56,10 +56,10 @@ export const providerTemplates = pgTable('provider_template', {
 /** Global crop presets per provider. One row per provider. Used by video.crop module. */
 export const providerCropPresets = pgTable('provider_crop_preset', {
   providerId: uuid('provider_id').references(() => providerTemplates.id, { onDelete: 'cascade' }).primaryKey(),
-  left: integer('left').notNull().default(0),
-  top: integer('top').notNull().default(0),
-  right: integer('right').notNull().default(0),
-  bottom: integer('bottom').notNull().default(0),
+  left: real('left').notNull().default(0),
+  top: real('top').notNull().default(0),
+  right: real('right').notNull().default(0),
+  bottom: real('bottom').notNull().default(0),
   updatedAt: timestamp('updated_at').defaultNow(),
 });
 

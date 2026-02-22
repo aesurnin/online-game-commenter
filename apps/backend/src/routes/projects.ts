@@ -9,7 +9,8 @@ import fs from 'fs';
 import { cleanupWorkflowModuleCache, ensureWorkflowModuleCacheDirs, listWorkflowModuleCache, listWorkflowCacheFolderContents, getWorkflowCacheFilePath, getWorkflowCacheFolderR2Url, readWorkflowModuleMetadata, readWorkflowModuleSlots } from '../lib/workflow/runner.js';
 import { ensurePricingLoaded, calculateCost } from '../lib/workflow/openrouter-pricing.js';
 import { generateScenarioPreview } from '../lib/workflow/modules/llm-scenario-generator.js';
-import { resolveWorkflowVariablesForApi } from '../lib/workflow/variable-resolver.js';
+import { resolveWorkflowVariablesForApi, findOutputInCacheDir } from '../lib/workflow/variable-resolver.js';
+import { getModule } from '../lib/workflow/registry.js';
 import { addScreencastJob, removeScreencastJobByVideoId } from '../lib/queue.js';
 import { listJobs } from '../lib/workflow-job-store.js';
 import { getFrame, clearFrame } from '../lib/live-preview-store.js';
@@ -653,7 +654,10 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
       .where(and(eq(videoEntities.id, videoId), eq(videoEntities.projectId, projectId)));
     if (!video) return reply.status(404).send({ error: 'Video not found' });
 
-    const resolved = await resolveWorkflowVariablesForApi(projectId, videoId, { modules });
+    const cacheBase = process.env.WORKFLOW_CACHE_BASE || path.join(process.cwd(), 'workflow-cache');
+    const videoDir = path.join(cacheBase, projectId, videoId);
+    const folders = await listWorkflowModuleCache(projectId, videoId);
+
     const stepOutputUrls: Record<number, string> = {};
     const stepOutputContentTypes: Record<number, string> = {};
     const stepRemotionSceneUrls: Record<number, string> = {};
@@ -662,18 +666,26 @@ const projectsRoutes: FastifyPluginAsync = async (fastify) => {
 
     for (let i = 0; i < modules.length; i++) {
       const def = modules[i];
-      if (!def.outputs) continue;
-      const firstVarName = Object.values(def.outputs)[0];
-      if (!firstVarName) continue;
-      const info = resolved[firstVarName];
-      if (!info) continue;
-      const fileUrl = `/api/projects/${projectId}/videos/${videoId}/workflow-cache/${encodeURIComponent(info.folderName)}/file?path=${encodeURIComponent(info.fileName)}`;
+      const mod = getModule(def.type);
+      if (!mod || !def.outputs) continue;
+
+      const match = folders.find((f) => f.moduleId === def.id);
+      if (!match) continue;
+
+      const dirPath = path.join(videoDir, match.folderName);
+      const firstSlot = mod.meta.outputSlots?.[0];
+      const kind = firstSlot?.kind === 'text' ? 'text' : firstSlot?.kind === 'file' ? 'file' : 'video';
+      const outPath = await findOutputInCacheDir(dirPath, kind);
+      if (!outPath) continue;
+
+      const fileName = path.basename(outPath);
+      const fileUrl = `/api/projects/${projectId}/videos/${videoId}/workflow-cache/${encodeURIComponent(match.folderName)}/file?path=${encodeURIComponent(fileName)}`;
       stepOutputUrls[i] = fileUrl;
       stepStatuses[i] = 'done';
-      const ext = info.fileName.toLowerCase();
-      stepOutputContentTypes[i] = ext.endsWith('.md') ? 'text/markdown' : ext.endsWith('.json') ? 'application/json' : info.isText ? 'text/plain' : 'video/mp4';
+      const ext = fileName.toLowerCase();
+      stepOutputContentTypes[i] = ext.endsWith('.md') ? 'text/markdown' : ext.endsWith('.json') ? 'application/json' : kind === 'text' ? 'text/plain' : 'video/mp4';
       if (def.type === 'video.render.remotion') {
-        stepRemotionSceneUrls[i] = `/api/projects/${projectId}/videos/${videoId}/workflow-cache/${encodeURIComponent(info.folderName)}/file?path=${encodeURIComponent('scene.json')}`;
+        stepRemotionSceneUrls[i] = `/api/projects/${projectId}/videos/${videoId}/workflow-cache/${encodeURIComponent(match.folderName)}/file?path=${encodeURIComponent('scene.json')}`;
       }
       if (def.type === 'llm.scenario.generator' && def.id) {
         const slotsResult = await readWorkflowModuleSlots(projectId, videoId, def.id);

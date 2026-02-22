@@ -8,6 +8,8 @@ import { TtsElevenlabsModule } from './modules/tts-elevenlabs.js';
 import { VideoRenderRemotionModule } from './modules/video-render-remotion.js';
 import { LlmScenarioGeneratorModule } from './modules/llm-scenario-generator.js';
 import { AudioLibrarySelectModule } from './modules/audio-library-select.js';
+import { HeyGenAvatarVideoModule } from './modules/heygen-avatar-video.js';
+import { FalVeedFabricAvatarModule } from './modules/fal-veed-fabric-avatar.js';
 
 const modules = new Map<string, WorkflowModule>();
 
@@ -24,6 +26,8 @@ register(new TtsElevenlabsModule());
 register(new VideoRenderRemotionModule());
 register(new LlmScenarioGeneratorModule());
 register(new AudioLibrarySelectModule());
+register(new HeyGenAvatarVideoModule());
+register(new FalVeedFabricAvatarModule());
 
 export function getModule(type: string): WorkflowModule | undefined {
   return modules.get(type);

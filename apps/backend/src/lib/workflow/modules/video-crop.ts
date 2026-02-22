@@ -57,10 +57,10 @@ export const videoCropMeta = {
 
 /** Params: left, top, right, bottom = margin % from each edge (0–100). */
 function paramsToLtwh(params: Record<string, unknown>): { left: number; top: number; width: number; height: number } {
-  const left = Math.max(0, Math.min(100, Number(params.left) ?? 0));
-  const top = Math.max(0, Math.min(100, Number(params.top) ?? 0));
-  const right = Math.max(0, Math.min(100, Number(params.right) ?? 0));
-  const bottom = Math.max(0, Math.min(100, Number(params.bottom) ?? 0));
+  const left = Math.max(0, Math.min(100, Number(params.left ?? 0)));
+  const top = Math.max(0, Math.min(100, Number(params.top ?? 0)));
+  const right = Math.max(0, Math.min(100, Number(params.right ?? 0)));
+  const bottom = Math.max(0, Math.min(100, Number(params.bottom ?? 0)));
   const width = Math.max(0, 100 - left - right);
   const height = Math.max(0, 100 - top - bottom);
   return { left, top, width, height };
@@ -80,20 +80,22 @@ export class VideoCropModule implements WorkflowModule {
       const [preset] = await db.select()
         .from(providerCropPresets)
         .where(eq(providerCropPresets.providerId, providerId));
-      if (preset) {
+      // Only use preset if it has at least one non-zero value; otherwise fall back to workflow params
+      if (preset && (preset.left || preset.top || preset.right || preset.bottom)) {
         effectiveParams = {
           left: preset.left,
           top: preset.top,
           right: preset.right,
           bottom: preset.bottom,
         };
-        context.onLog?.(`Using provider crop preset (provider ${providerId.slice(0, 8)}...)`);
+        context.onLog?.(`[VideoCrop] Using provider crop preset (provider ${providerId.slice(0, 8)}...)`);
       }
     }
     const { left: leftPct, top: topPct, width: widthPct, height: heightPct } = paramsToLtwh(effectiveParams);
 
     const { onProgress, onLog } = context;
-    const inputPath = context.currentVideoPath;
+    const inputPaths = context.inputPaths ?? {};
+    const inputPath = inputPaths['video'] || context.currentVideoPath;
 
     try {
       await fs.access(inputPath);
@@ -124,7 +126,7 @@ export class VideoCropModule implements WorkflowModule {
       return { success: false, error: `Invalid crop dimensions: ${w}x${h}` };
     }
 
-    onLog?.(`Crop: ${leftPct}%,${topPct}% ${widthPct}%x${heightPct}% -> ${x},${y} ${w}x${h}px`);
+    onLog?.(`[VideoCrop] Crop: ${leftPct}%,${topPct}% ${widthPct}%x${heightPct}% -> ${x},${y} ${w}x${h}px`);
     onProgress?.(0, 'Preparing');
 
     const ext = path.extname(inputPath) || '.mp4';
@@ -157,25 +159,27 @@ export class VideoCropModule implements WorkflowModule {
         }, { once: true });
       }
 
-      proc.on('error', (err) => {
-        onLog?.(`Spawn error: ${err}`);
-        resolve(false);
-      });
-      proc.on('close', (code) => resolve(code === 0));
-
-      // Capture stderr for progress parsing (generic approach)
-      proc.stderr?.on('data', (chunk: Buffer) => {
-         // We can implement progress parsing here if needed, similar to compressor
-         const text = chunk.toString();
-         if (text.toLowerCase().includes('error')) {
-            onLog?.(`[FFmpeg Error] ${text}`);
-         }
-      });
-
-      setTimeout(() => {
+      const timeout = setTimeout(() => {
         proc.kill('SIGKILL');
         resolve(false);
-      }, 600_000); // 10 min timeout
+      }, 600_000);
+
+      proc.on('error', (err) => {
+        clearTimeout(timeout);
+        onLog?.(`[VideoCrop] Spawn error: ${err}`);
+        resolve(false);
+      });
+      proc.on('close', (code) => {
+        clearTimeout(timeout);
+        resolve(code === 0);
+      });
+
+      proc.stderr?.on('data', (chunk: Buffer) => {
+         const text = chunk.toString();
+         if (text.toLowerCase().includes('error')) {
+            onLog?.(`[VideoCrop] FFmpeg error: ${text}`);
+         }
+      });
     });
 
     if (!ok) {

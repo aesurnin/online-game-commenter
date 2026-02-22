@@ -9,6 +9,14 @@ export interface SceneVideoClip {
   durationInFrames: number
   layout?: "fill" | "contain" | "cover"
   volume?: number
+  /** Horizontal offset as % of scene width; negative = left, positive = right (default 0) */
+  x?: number
+  /** Vertical offset as % of scene height; negative = up, positive = down (default 0) */
+  y?: number
+  /** Scale factor; 1 = natural size, 0.5 = half, 2 = double (default 1) */
+  scale?: number
+  /** Opacity 0 (transparent) to 1 (fully opaque) (default 1) */
+  opacity?: number
 }
 
 /** Text overlay clip in RemotionScene JSON schema */
@@ -92,11 +100,17 @@ export const SceneComposition: React.FC<RemotionSceneProps> = ({ scene }) => {
       )}
       {clips.map((clip, idx) => {
         if (clip.type === "video") {
+          const hasTransform = clip.x != null || clip.y != null || clip.scale != null
+          const transform = hasTransform
+            ? `translate(${clip.x ?? 0}%, ${clip.y ?? 0}%) scale(${clip.scale ?? 1})`
+            : undefined
           return (
             <Sequence key={idx} from={clip.from} durationInFrames={clip.durationInFrames}>
               <AbsoluteFill
                 style={{
                   objectFit: clip.layout ?? "contain",
+                  ...(transform ? { transform, transformOrigin: "center center" } : {}),
+                  ...(clip.opacity != null ? { opacity: clip.opacity } : {}),
                 }}
               >
                 <Video

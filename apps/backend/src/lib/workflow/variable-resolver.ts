@@ -47,7 +47,7 @@ async function resolveModuleCacheDir(videoDir: string, moduleId: string): Promis
   return null;
 }
 
-async function findOutputInCacheDir(dirPath: string, kind: 'video' | 'text' | 'file'): Promise<string | null> {
+export async function findOutputInCacheDir(dirPath: string, kind: 'video' | 'text' | 'file'): Promise<string | null> {
   const exts = kind === 'video' ? VIDEO_EXT : kind === 'text' ? TEXT_EXT : FILE_EXT;
   const names = kind === 'video' ? ['output', 'crop_output'] : ['output'];
   try {

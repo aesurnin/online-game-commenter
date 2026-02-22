@@ -3,6 +3,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { ElevenLabsClient } from '@elevenlabs/elevenlabs-js';
 import type { WorkflowContext, WorkflowModule, ModuleRunResult } from '../types.js';
+import { getVideoDuration } from './utils.js';
 
 /** Segment from the input JSON (comments with timing) */
 interface CommentSegment {
@@ -72,6 +73,7 @@ export const ttsElevenlabsMeta = {
       options: OUTPUT_FORMATS.map((o) => ({ value: o.value, label: o.label })) },
     { key: 'stability', label: 'Stability', type: 'number' as const, default: 0.5, min: 0, max: 1 },
     { key: 'similarityBoost', label: 'Similarity boost', type: 'number' as const, default: 0.75, min: 0, max: 1 },
+    { key: 'trimOverlap', label: 'Trim overlap', type: 'boolean' as const, default: true },
   ],
 };
 
@@ -109,6 +111,7 @@ export class TtsElevenlabsModule implements WorkflowModule {
     const outputFormat = String(params.outputFormat ?? 'mp3_44100_128');
     const stability = Math.max(0, Math.min(1, Number(params.stability) ?? 0.5));
     const similarityBoost = Math.max(0, Math.min(1, Number(params.similarityBoost) ?? 0.75));
+    const trimOverlap = params.trimOverlap !== false;
     onLog?.('[TTS ElevenLabs] === Module start ===');
     onLog?.(`[TTS ElevenLabs] Input: "${textPath}"`);
     onLog?.(`[TTS ElevenLabs] Voice: ${voiceId}, Model: ${modelId}`);
@@ -189,6 +192,13 @@ export class TtsElevenlabsModule implements WorkflowModule {
       }
     }
 
+    onProgress?.(82, 'Getting segment durations');
+    const segmentDurations: number[] = [];
+    for (let i = 0; i < segmentPaths.length; i++) {
+      const dur = await getVideoDuration(segmentPaths[i], context.signal);
+      segmentDurations.push(dur);
+    }
+
     onProgress?.(85, 'Merging audio segments');
     onLog?.(`[TTS ElevenLabs] Cached segments dir: ${segmentsDir}`);
     onLog?.('[TTS ElevenLabs] Merging segments with timing...');
@@ -200,7 +210,15 @@ export class TtsElevenlabsModule implements WorkflowModule {
     for (let i = 0; i < segmentPaths.length; i++) {
       inputs.push('-i', segmentPaths[i]);
       const delayMs = Math.round(segmentStarts[i] * 1000);
-      filterParts.push(`[${i}:a]adelay=${delayMs}|${delayMs}[a${i}]`);
+      let filterIn = `[${i}:a]`;
+      if (trimOverlap && i < segmentPaths.length - 1) {
+        const maxDur = segmentStarts[i + 1] - segmentStarts[i];
+        if (maxDur > 0 && segmentDurations[i] > maxDur) {
+          filterIn += `atrim=end=${maxDur},`;
+          onLog?.(`[TTS ElevenLabs] Trimming segment ${i + 1} from ${segmentDurations[i].toFixed(2)}s to ${maxDur.toFixed(2)}s`);
+        }
+      }
+      filterParts.push(`${filterIn}adelay=${delayMs}|${delayMs}[a${i}]`);
     }
     const mixInputs = segmentPaths.map((_, i) => `[a${i}]`).join('');
     // normalize=0: prevents amix from re-balancing volume as earlier segments end

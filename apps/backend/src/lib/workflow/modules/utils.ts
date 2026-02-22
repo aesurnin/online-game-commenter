@@ -230,9 +230,18 @@ export async function callOpenRouter(
     });
   } catch (e) {
     clearTimeout(timeoutId);
-    const msg = e instanceof Error && e.name === 'AbortError'
-      ? 'Request aborted (timeout or cancelled)'
-      : String(e);
+    let msg: string;
+    if (e instanceof Error && e.name === 'AbortError') {
+      msg = 'Request aborted (timeout or cancelled)';
+    } else if (e instanceof Error) {
+      const cause = (e as Error & { cause?: Error & { code?: string } }).cause;
+      const code = cause?.code ?? (e as Error & { code?: string }).code;
+      const causeStr = cause ? ` (cause: ${cause.code ?? cause.message})` : '';
+      msg = `${e.message}${causeStr}`;
+      if (code) onLog?.(`[callOpenRouter] Error code: ${code}`);
+    } else {
+      msg = String(e);
+    }
     onLog?.(`[callOpenRouter] FAILED: ${msg}`);
     return { error: `OpenRouter request failed: ${msg}` };
   }

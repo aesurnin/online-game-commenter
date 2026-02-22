@@ -1,4 +1,5 @@
 import { FastifyPluginAsync } from 'fastify';
+import path from 'path';
 import z from 'zod';
 import { and, eq } from 'drizzle-orm';
 import { db } from '../db/index.js';
@@ -8,6 +9,7 @@ import { listModules } from '../lib/workflow/registry.js';
 import { createJob, getJob } from '../lib/workflow-job-store.js';
 import { addWorkflowJob } from '../lib/queue.js';
 import { ensurePricingLoaded, calculateCost } from '../lib/workflow/openrouter-pricing.js';
+import { resolveWorkflowVariables } from '../lib/workflow/variable-resolver.js';
 
 const workflowsRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.addHook('preHandler', async (request, reply) => {
@@ -215,13 +217,59 @@ const workflowsRoutes: FastifyPluginAsync = async (fastify) => {
     return reply.status(202).send({ jobId });
   });
 
-  /** Test crop on a single frame. Accepts crop as margin %: left, top, right, bottom (0–100 each). */
+  /** Get the video URL that the crop step will receive as input (for CropModal and test-crop). */
   fastify.post<{
     Params: { id: string };
-    Body: { projectId: string; videoId: string; left: number; top: number; right: number; bottom: number; time?: number };
+    Body: { projectId: string; videoId: string; workflow?: { modules?: Array<{ id: string; type: string; inputs?: Record<string, string> }> }; stepIndex: number };
+  }>('/:id/crop-input-video', async (request, reply) => {
+    const { projectId, videoId } = request.body as { projectId: string; videoId: string; workflow?: { modules?: unknown[] }; stepIndex: number };
+    const workflow = request.body.workflow;
+    const stepIndex = request.body.stepIndex ?? 0;
+    const modules = workflow?.modules ?? [];
+
+    const project = await db.query.projects.findFirst({
+      where: (p, { and, eq }) => and(eq(p.id, projectId), eq(p.ownerId, request.user!.id)),
+    });
+    if (!project) return reply.status(404).send({ error: 'Project not found' });
+
+    const [video] = await db.select()
+      .from(videoEntities)
+      .where(and(eq(videoEntities.id, videoId), eq(videoEntities.projectId, projectId)));
+    if (!video) return reply.status(404).send({ error: 'Video not found' });
+
+    const sourceKey = video.sourceUrl;
+    if (!sourceKey?.startsWith('projects/')) return reply.status(400).send({ error: 'Video has no R2 source' });
+
+    const streamPath = `/api/projects/${projectId}/videos/${videoId}/stream`;
+    if (stepIndex === 0) return reply.send({ url: streamPath });
+
+    const def = modules[stepIndex] as { inputs?: Record<string, string> } | undefined;
+    const inputVar = def?.inputs?.video;
+    if (!inputVar || inputVar === 'source') return reply.send({ url: streamPath });
+
+    const cacheBase = process.env.WORKFLOW_CACHE_BASE || path.join(process.cwd(), 'workflow-cache');
+    const videoDir = path.join(cacheBase, projectId, videoId);
+    const variables = await resolveWorkflowVariables(projectId, videoId, { modules }, {
+      endExclusive: stepIndex,
+    });
+    const inputPath = variables[inputVar];
+    if (!inputPath) return reply.send({ url: streamPath });
+
+    const relative = path.relative(videoDir, inputPath).split(path.sep).join('/');
+    const parts = relative.split('/');
+    const folderName = parts[0];
+    const fileName = parts.length > 1 ? parts.slice(1).join('/') : path.basename(inputPath);
+    const fileUrl = `/api/projects/${projectId}/videos/${videoId}/workflow-cache/${encodeURIComponent(folderName)}/file?path=${encodeURIComponent(fileName)}`;
+    return reply.send({ url: fileUrl });
+  });
+
+  /** Test crop on a single frame. Uses the same input video as the crop module would receive. */
+  fastify.post<{
+    Params: { id: string };
+    Body: { projectId: string; videoId: string; left: number; top: number; right: number; bottom: number; time?: number; workflow?: { modules?: unknown[] }; stepIndex?: number };
   }>('/:id/test-crop', async (request, reply) => {
     const body = request.body;
-    const { projectId, videoId, time = 0 } = body;
+    const { projectId, videoId, time = 0, workflow: bodyWorkflow, stepIndex = 0 } = body;
     const left = Math.max(0, Math.min(100, body.left ?? 0));
     const top = Math.max(0, Math.min(100, body.top ?? 0));
     const right = Math.max(0, Math.min(100, body.right ?? 0));
@@ -243,18 +291,32 @@ const workflowsRoutes: FastifyPluginAsync = async (fastify) => {
     if (!sourceKey) return reply.status(400).send({ error: 'Video source not found' });
 
     const { getPresignedUrl } = await import('../lib/r2.js');
-    const sourceUrl = await getPresignedUrl(sourceKey, 3600);
-
     const { spawn } = await import('child_process');
 
-    async function getVideoDimensions(url: string): Promise<{ width: number; height: number }> {
+    let videoInput: string;
+    if (stepIndex === 0 || !bodyWorkflow?.modules?.length) {
+      videoInput = await getPresignedUrl(sourceKey, 3600);
+    } else {
+      const modules = bodyWorkflow.modules as Array<{ id: string; type: string; inputs?: Record<string, string> }>;
+      const def = modules[stepIndex];
+      const inputVar = def?.inputs?.video;
+      const variables = await resolveWorkflowVariables(projectId, videoId, { modules }, { endExclusive: stepIndex });
+      const inputPath = inputVar ? variables[inputVar] : null;
+      if (inputPath) {
+        videoInput = inputPath;
+      } else {
+        videoInput = await getPresignedUrl(sourceKey, 3600);
+      }
+    }
+
+    async function getVideoDimensions(input: string): Promise<{ width: number; height: number }> {
       return new Promise((resolve, reject) => {
         const proc = spawn('ffprobe', [
           '-v', 'error',
           '-select_streams', 'v:0',
           '-show_entries', 'stream=width,height',
           '-of', 'csv=p=0',
-          '-i', url,
+          '-i', input,
         ], { stdio: ['ignore', 'pipe', 'pipe'] });
         let out = '';
         proc.stdout?.on('data', (c) => { out += c.toString(); });
@@ -269,7 +331,7 @@ const workflowsRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     try {
-      const dims = await getVideoDimensions(sourceUrl);
+      const dims = await getVideoDimensions(videoInput);
       const x = Math.round((left / 100) * dims.width) & ~1;
       const y = Math.round((top / 100) * dims.height) & ~1;
       const w = Math.round((widthPct / 100) * dims.width) & ~1;
@@ -281,7 +343,7 @@ const workflowsRoutes: FastifyPluginAsync = async (fastify) => {
       const chunks: Buffer[] = [];
       const args = [
         '-ss', String(time),
-        '-i', sourceUrl,
+        '-i', videoInput,
         '-vf', `crop=${w}:${h}:${x}:${y}`,
         '-vframes', '1',
         '-f', 'image2',

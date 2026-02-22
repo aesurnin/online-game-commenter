@@ -79,6 +79,23 @@ export type WorkflowJobData = {
 
 export async function addWorkflowJob(data: WorkflowJobData): Promise<{ id: string }> {
   const jobName = data.stepIndex != null ? 'step' : 'run';
+
+  const [waiting, active] = await Promise.all([
+    workflowQueue.getWaiting(),
+    workflowQueue.getActive(),
+  ]);
+  const existing = [...waiting, ...active].find((j) => {
+    const d = j.data as WorkflowJobData;
+    if (d?.videoId !== data.videoId) return false;
+    return data.stepIndex != null
+      ? d.stepIndex === data.stepIndex
+      : d.stepIndex == null;
+  });
+  if (existing) {
+    console.log('[Queue] Workflow job already queued/running for this video, returning existing', existing.id);
+    return { id: existing.id! };
+  }
+
   const job = await workflowQueue.add(jobName, data);
   console.log('[Queue] Added workflow job', job.id, 'workflowId=', data.workflowId, 'stepIndex=', data.stepIndex);
   return { id: job.id! };
